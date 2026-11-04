@@ -34,7 +34,7 @@ const REQUEST_TIMEOUT_S = 20
  * network     网络或响应异常，稍后重试即可
  * session     登录已失效，可以用保存的凭据重新登录
  * device      国网要求新设备短信验证（4006）
- * risk        国网安全校验未通过（RK008）
+ * risk        国网安全校验未通过（RK 开头的代码，提示语常写成“网络连接超时”，但不是真的网络问题）
  * credentials 账号或密码被拒绝
  * business    单个接口报错，其他接口可能仍然可用
  */
@@ -196,7 +196,8 @@ function unwrap(response: Json): Json {
   const message = String((server ? server.resultMessage : response.message) ?? '')
   const code = serverCode || topCode
   if (code === '4006') throw new SgccError('device', code, '国网要求验证新设备')
-  if (code === 'RK008') throw new SgccError('risk', code, '国网安全校验未通过')
+  // 上游只记录了 RK008。真机上还见过提示语相同的 RK007，同一系列都按风控处理：宁可停下，也不要继续试。
+  if (/^RK\d+$/.test(code)) throw new SgccError('risk', code, `国网安全校验未通过（${code}）`)
   if (code === '-200' || code === '-201') throw new SgccError('session', code, '登录已失效')
   if (serverCode && serverCode !== '0000') throw new SgccError('business', serverCode, message || '国网返回错误')
   if (topCode !== '' && topCode !== '1') throw new SgccError('business', topCode, message || '国网返回错误')

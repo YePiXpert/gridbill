@@ -13,7 +13,7 @@ function createFakeScripting() {
   const fake = {
     Widget: { family: 'systemMedium', displaySize: { width: 338, height: 158 }, parameter: '', reloadAll() {}, preview: async () => {}, present() {} },
     Navigation: { useDismiss: () => () => {}, present: async () => {} },
-    Script: { exit() {} },
+    Script: { exit() {}, metadata: { version: '9.9.9', remoteResource: null } },
     useState: initial => [typeof initial === 'function' ? initial() : initial, () => {}],
     fetch: async () => {
       throw new Error('UI 测试不应该联网')

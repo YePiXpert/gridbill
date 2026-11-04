@@ -135,6 +135,16 @@ test('短信只发 logindevice 类型', async () => {
   assert.equal(server.requests[0].payload.quInfo.account, '13800000000')
 })
 
+test('RK 开头的代码都算风控，不能当成密码错误，错误里带上具体代码', async () => {
+  const message = '网络连接超时 (RK007),请重试!'
+  const server = createMockServer({ login: () => fail('RK007', message), balance: () => fail('RK007', message) })
+  const isRisk = error => error instanceof SgccError && error.kind === 'risk' && error.code === 'RK007' && error.message.includes('RK007') && !error.message.includes('请重试')
+  await assert.rejects(makeClient(server).login('x'), isRisk)
+  await assert.rejects(makeClient(server).balance(SESSION, ACCOUNT), isRisk)
+  const other = createMockServer({ balance: () => fail('RKX', '不是这个系列') })
+  await assert.rejects(makeClient(other).balance(SESSION, ACCOUNT), error => error.kind === 'business')
+})
+
 test('错误分类和上游 _raise_for_error 一致', async () => {
   const cases = [
     [fail('4006', '新设备'), 'device'],

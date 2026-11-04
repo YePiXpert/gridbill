@@ -1,5 +1,5 @@
 /** 脚本主界面：登录、选户号、显示设置、手动刷新。 */
-import { Button, LabeledContent, List, Navigation, NavigationStack, Picker, SecureField, Section, Text, TextField, useState, Widget } from 'scripting'
+import { Button, LabeledContent, List, Navigation, NavigationStack, Picker, Script, SecureField, Section, Text, TextField, useState, Widget } from 'scripting'
 import { chinaTime, SgccError } from '../lib/protocol/client'
 import { createService, type LoginState } from '../lib/service'
 import { scriptingTransport } from '../lib/transport'
@@ -10,7 +10,7 @@ import { accountDisplayName, formatKwh } from '../lib/view-model'
 const service = createService(scriptingTransport)
 const SMS_COOLDOWN_MS = 60 * 1000
 
-function describeError(error: unknown): string {
+export function describeError(error: unknown): string {
   if (error instanceof SgccError) {
     switch (error.kind) {
       case 'network':
@@ -18,7 +18,7 @@ function describeError(error: unknown): string {
       case 'device':
         return '国网要求验证新设备。点“发送验证码”，收到短信后填入再登录。'
       case 'risk':
-        return '国网安全校验未通过（RK008）。普通短信不一定能解决，建议先在官方 App 确认账号状态，过一段时间再试。'
+        return `国网的安全校验拦下了这次请求${/^RK/.test(error.code) ? `（${error.code}）` : ''}。国网的提示常写成“网络连接超时，请重试”，但多半不是网络问题，不要反复重试。建议先确认官方 App 能正常使用，过几个小时再试一次。短信不一定能解决。`
       default:
         return error.message
     }
@@ -153,6 +153,28 @@ export function SettingsPage({ initial }: { initial: InitialState }) {
       Widget.reloadAll()
     })
 
+  /** 登录还有效时重新登录没有好处：短时间内多次登录，真机上被国网的安全校验拦下过。 */
+  const startRelogin = async () => {
+    if (login.sessionExpiresAt) {
+      const confirmed = await Dialog.confirm({
+        title: '确定要重新登录吗？',
+        message: '当前登录还有效，到期后会自动续，通常不需要重新登录。短时间内多次登录可能被国网的安全校验拦下。',
+        cancelLabel: '取消',
+        confirmLabel: '继续',
+      })
+      if (!confirmed) return
+    }
+    setWantsRelogin(true)
+  }
+
+  const cancelRelogin = () => {
+    setWantsRelogin(false)
+    setPhone(login.phone)
+    setPassword('')
+    setNeedsSms(false)
+    setMessage('')
+  }
+
   const sendCode = () =>
     guarded(async () => {
       const wait = smsSentAt + SMS_COOLDOWN_MS - Date.now()
@@ -249,7 +271,8 @@ export function SettingsPage({ initial }: { initial: InitialState }) {
           {showForm && needsSms ? <Button title="发送验证码" action={sendCode} disabled={busy || !phone.trim()} /> : null}
           {showForm && needsSms ? <Field title="短信验证码" prompt="6 位数字" value={code} onChanged={setCode} keyboardType="numberPad" textContentType="oneTimeCode" disabled={busy} /> : null}
           {showForm ? <Button title={busy ? '处理中…' : needsSms ? '验证并登录' : '登录'} action={signIn} disabled={busy || !phone.trim() || !password} /> : null}
-          {login.signedIn && !showForm ? <Button title="重新登录" action={() => setWantsRelogin(true)} /> : null}
+          {wantsRelogin && !login.block ? <Button title="取消" action={cancelRelogin} disabled={busy} /> : null}
+          {login.signedIn && !showForm ? <Button title="重新登录" action={startRelogin} /> : null}
           {message ? (
             <Text font="caption" foregroundStyle="secondaryLabel">
               {message}
@@ -309,6 +332,8 @@ export function SettingsPage({ initial }: { initial: InitialState }) {
           <Button title={busy ? '处理中…' : '立即刷新'} action={refresh} disabled={busy || !login.signedIn || !!login.block} />
           <Button title="诊断每日数据" action={diagnose} disabled={busy || !login.signedIn || !!login.block} />
           {report ? <Text font="caption">{report}</Text> : null}
+          <LabeledContent title="脚本版本" value={Script.metadata.version ?? '未知'} />
+          <LabeledContent title="远程来源" value={Script.metadata.remoteResource?.url ? '已设置' : '未设置'} />
           <Button title="退出并清除全部数据" role="destructive" action={erase} disabled={busy} />
         </Section>
       </List>

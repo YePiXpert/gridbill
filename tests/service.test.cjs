@@ -481,8 +481,40 @@ test('改过密码（自动登录被拒）：只试一次，之后小组件完�
   assert.ok(vault.credentials().passwordMd5 === md5Hex('new-password'))
 })
 
-test('风控（RK008）和新设备（4006）同样立即停止，且绝不自动发短信', async () => {
-  for (const [code, kind] of [['RK008', 'risk'], ['4006', 'device']]) {
+test('手动重新登录被 RK007 拦下：现有登录和设备身份不变，小组件照常工作', async () => {
+  const defaults = createMockServer().handlers
+  let blocked = false
+  const { service, server } = await signedIn({
+    login: () => (blocked ? fail('RK007', '网络连接超时 (RK007),请重试!') : defaults.login()),
+  })
+  const session = vault.session()
+  const seed = vault.device('13800000000').seedHex
+  blocked = true
+  await assert.rejects(service.signIn('13800000000', PASSWORD), error => error.kind === 'risk' && error.code === 'RK007')
+  assert.deepEqual(vault.session(), session)
+  assert.equal(vault.device('13800000000').seedHex, seed)
+  assert.equal(service.state().block, null, '现有登录还能用，不用停掉小组件')
+  assert.equal(service.state().sessionExpiresAt, session.expiresAt)
+  server.requests.length = 0
+  const model = await service.loadWidgetModel('')
+  assert.equal(model.state, 'ok')
+  assert.equal(model.view.notice, null)
+  assert.equal(server.count('login'), 0)
+})
+
+test('全新安装时登录被 RK007 拦下：不保存账号，再试还是同一个设备身份', async () => {
+  const { service, server } = setup({ login: () => fail('RK007', '网络连接超时 (RK007),请重试!') })
+  for (let i = 0; i < 2; i++) {
+    await assert.rejects(service.signIn('13800000000', PASSWORD), error => error.kind === 'risk')
+  }
+  assert.equal(vault.credentials(), null)
+  assert.equal(service.state().signedIn, false)
+  assert.equal(new Set(server.requests.map(r => r.headers.AppGuid)).size, 1)
+  assert.equal(server.count('sms'), 0, '风控不能靠自动发短信解决')
+})
+
+test('风控（RK008、RK007）和新设备（4006）同样立即停止，且绝不自动发短信', async () => {
+  for (const [code, kind] of [['RK008', 'risk'], ['RK007', 'risk'], ['4006', 'device']]) {
     const defaults = createMockServer().handlers
     let triggered = false
     const { service, server, clock } = await signedIn({ login: () => (triggered ? fail(code) : defaults.login()) })

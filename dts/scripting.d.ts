@@ -29,6 +29,10 @@ export declare const Navigation: {
 
 export declare const Script: {
   exit(result?: unknown): void
+  readonly metadata: {
+    version?: string
+    remoteResource?: { url: string; autoUpdateInterval?: number | null } | null
+  }
 }
 
 export declare const Widget: {

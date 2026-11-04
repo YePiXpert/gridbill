@@ -7,7 +7,8 @@ const { fake, expand, texts, findAll } = require('./support/fake-ui.cjs')
 const { resetStores } = require('./support/shim.cjs')
 
 const { WidgetRoot, amountFontSize } = require('../.build/GridBill/ui/widget-views')
-const { SettingsPage, loadInitialState } = require('../.build/GridBill/ui/settings')
+const { SettingsPage, describeError, loadInitialState } = require('../.build/GridBill/ui/settings')
+const { SgccError } = require('../.build/GridBill/lib/protocol/client')
 const { buildBillView, demoSnapshot } = require('../.build/GridBill/lib/view-model')
 const { DEFAULT_SETTINGS } = require('../.build/GridBill/lib/types')
 const { loadSettings, vault } = require('../.build/GridBill/lib/vault')
@@ -185,11 +186,13 @@ function mountSettings() {
     return [slots[index], value => { slots[index] = value }]
   }
   const initial = loadInitialState()
+  const tree = () => {
+    cursor = 0
+    return expand(createElement(SettingsPage, { initial }))
+  }
   return {
-    field(title) {
-      cursor = 0
-      return findAll(expand(createElement(SettingsPage, { initial })), 'TextField').find(node => node.props.title === title)
-    },
+    tree,
+    field: title => findAll(tree(), 'TextField').find(node => node.props.title === title),
     restore() {
       fake.useState = original
     },
@@ -226,6 +229,98 @@ test('设置页：单价能一个字一个字地输入，“0.”不会被吞掉
   }
 })
 
+test('设置页：显示脚本版本和远程来源，方便确认手机上跑的是哪个版本', () => {
+  resetStores()
+  const row = (tree, title) => findAll(tree, 'LabeledContent').find(node => node.props.title === title).props.value
+  assert.equal(row(renderSettings(), '脚本版本'), '9.9.9')
+  assert.equal(row(renderSettings(), '远程来源'), '未设置')
+  const original = fake.Script.metadata
+  fake.Script.metadata = { version: '9.9.9', remoteResource: { url: 'https://github.com/owner/repository' } }
+  try {
+    assert.equal(row(renderSettings(), '远程来源'), '已设置')
+  } finally {
+    fake.Script.metadata = original
+  }
+})
+
+test('错误提示：风控不让人“请重试”，并写明具体代码', () => {
+  for (const code of ['RK007', 'RK008']) {
+    const text = describeError(new SgccError('risk', code, 'x'))
+    assert.ok(text.includes(code))
+    assert.match(text, /不要反复重试/)
+    assert.doesNotMatch(text, /，请重试。/)
+  }
+  assert.doesNotMatch(describeError(new SgccError('risk', 'blocked', 'x')), /blocked/, '被闸门拦下时没有 RK 代码可显示')
+})
+
+/** 已登录且会话有效的状态。 */
+function signedInStores() {
+  resetStores()
+  vault.saveCredentials({ phone: '13812345678', passwordMd5: 'x' })
+  vault.saveSession({ token: 't', userId: 'u', province: '', expiresAt: Date.now() + 86400000 })
+  vault.saveAccounts([ACCOUNT])
+}
+
+test('设置页：登录还有效时，重新登录要先确认；不确认就不显示表单', async () => {
+  signedInStores()
+  const page = mountSettings()
+  const original = globalThis.Dialog.confirm
+  try {
+    const shown = []
+    globalThis.Dialog.confirm = async options => {
+      shown.push(options)
+      return false
+    }
+    await button(page.tree(), '重新登录').props.action()
+    assert.equal(shown.length, 1)
+    assert.match(shown[0].message, /通常不需要重新登录/)
+    assert.ok(!titles(page.tree()).includes('密码'), '取消后不显示表单')
+
+    globalThis.Dialog.confirm = async () => true
+    await button(page.tree(), '重新登录').props.action()
+    assert.ok(titles(page.tree()).includes('密码'))
+  } finally {
+    globalThis.Dialog.confirm = original
+    page.restore()
+  }
+})
+
+test('设置页：重新登录的表单可以取消，取消后手机号不再显示', async () => {
+  signedInStores()
+  const page = mountSettings()
+  try {
+    await button(page.tree(), '重新登录').props.action()
+    assert.ok(JSON.stringify(page.tree()).includes('13812345678'), '表单里要能看到手机号')
+    button(page.tree(), '取消').props.action()
+    const after = page.tree()
+    assert.ok(!titles(after).includes('密码'))
+    assert.ok(titles(after).includes('重新登录'))
+    assert.ok(!JSON.stringify(after).includes('13812345678'))
+  } finally {
+    page.restore()
+  }
+})
+
+test('设置页：重新登录途中闸门关上了，就不能再取消', async () => {
+  signedInStores()
+  const page = mountSettings()
+  try {
+    await button(page.tree(), '重新登录').props.action()
+    assert.ok(titles(page.tree()).includes('取消'))
+    vault.saveGate({ block: { kind: 'risk', message: 'm', at: 1 }, lastAutoLoginAt: 0 })
+    // 没填密码，这次点击在联网之前就会失败，页面借此读到新的闸门状态。
+    await button(page.tree(), '登录').props.action()
+    assert.ok(!titles(page.tree()).includes('取消'))
+  } finally {
+    page.restore()
+  }
+})
+
+test('设置页：还没登录时直接显示表单，没有取消按钮', () => {
+  resetStores()
+  assert.ok(!titles(renderSettings()).includes('取消'))
+})
+
 test('设置页：被闸门拦下时提示并要求重新登录', () => {
   resetStores()
   vault.saveCredentials({ phone: '13812345678', passwordMd5: 'x' })
@@ -235,4 +330,5 @@ test('设置页：被闸门拦下时提示并要求重新登录', () => {
   assert.match(texts(tree).join(' '), /已暂停自动更新/)
   assert.ok(titles(tree).includes('密码'))
   assert.ok(button(tree, '立即刷新').props.disabled)
+  assert.ok(!titles(tree).includes('取消'), '闸门关着时不能取消，必须处理')
 })
