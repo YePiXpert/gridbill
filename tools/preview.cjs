@@ -110,18 +110,19 @@ function widget(model, family, size, dark) {
 const view = (snapshotPatch = {}, settings = {}, notice = null) =>
   buildBillView({ ...demoSnapshot(NOW), ...snapshotPatch }, ACCOUNT, { ...DEFAULT_SETTINGS, ...settings }, notice)
 const ok = v => ({ state: 'ok', view: v, nextRefresh: next })
-const TIERS = { tier2: 2880, tier3: 4800 }
 
 const CASES = [
-  ['默认（未设置阶梯）', ok(view())],
-  ['设置了阶梯', ok(view({}, TIERS))],
-  ['第三档、21 天', ok(view({ yearEstimateKwh: 5230 }, { ...TIERS, chartDays: 21 }))],
-  ['后付费应交', ok(view({ balance: { isPrepaid: false, balance: null, amountDue: 326.8, overdue: null } }, TIERS))],
+  ['默认（北京阶梯）', ok(view())],
+  ['快到第三档', ok(view({ yearEstimateKwh: 4700 }))],
+  ['第三档、21 天', ok(view({ yearEstimateKwh: 5230 }, { chartDays: 21 }))],
+  ['账单接口不可用（没有阶梯和电费）', ok(view({ yearEstimateKwh: null, yearKwh: null, lastBill: null }))],
+  ['后付费应交', ok(view({ balance: { isPrepaid: false, balance: null, amountDue: 326.8, overdue: null } }))],
   ['欠费', ok(view({ balance: { isPrepaid: false, balance: null, amountDue: 1280.5, overdue: 1280.5 } }))],
   ['余额接口不可用', ok(view({ balance: null }))],
-  ['数字很大', ok(view({ balance: { isPrepaid: true, balance: 12345.67, amountDue: null, overdue: null }, monthKwh: 1234, yearEstimateKwh: 12345, lastBill: { month: '2026-10', kwh: 2000, yuan: 1234.56, endDay: null } }, TIERS))],
-  ['需要处理（已停止联网）', ok(view({}, TIERS, '安全校验未通过，请打开脚本'))],
+  ['数字很大', ok(view({ balance: { isPrepaid: true, balance: 12345.67, amountDue: null, overdue: null }, monthKwh: 1234, yearEstimateKwh: 12345, lastBill: { month: '2026-10', kwh: 2000, yuan: 1234.56, endDay: null } }))],
+  ['需要处理（已停止联网）', ok(view({}, {}, '安全校验未通过，请打开脚本'))],
   ['没有每日数据', ok(view({ daily: [] }))],
+  ['每日数据只有 4 天', ok(view({ daily: ['2026-10-31', '2026-11-01', '2026-11-02', '2026-11-03'].map((day, i) => ({ day, kwh: [10.2, 11.5, 9.8, 10.6][i], yuan: null })) }))],
   ['还没有登录', { state: 'signedOut', nextRefresh: next }],
   ['出错', { state: 'error', message: '更新失败，稍后重试', nextRefresh: next }],
 ]

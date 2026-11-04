@@ -3,9 +3,9 @@ import { Button, LabeledContent, List, Navigation, NavigationStack, Picker, Secu
 import { chinaTime, SgccError } from '../lib/protocol/client'
 import { createService, type LoginState } from '../lib/service'
 import { scriptingTransport } from '../lib/transport'
-import type { Settings } from '../lib/types'
+import { DEFAULT_SETTINGS, type Settings } from '../lib/types'
 import { loadSettings, saveSettings, vault } from '../lib/vault'
-import { formatKwh } from '../lib/view-model'
+import { accountDisplayName, formatKwh } from '../lib/view-model'
 
 const service = createService(scriptingTransport)
 const SMS_COOLDOWN_MS = 60 * 1000
@@ -32,6 +32,14 @@ function formatTime(ms: number): string {
   const t = chinaTime(ms)
   return `${t.month}月${t.day}日 ${t.hour}:${t.minute}`
 }
+
+type PriceKey = 'price1' | 'price2' | 'price3'
+
+const priceTexts = (settings: Settings): Record<PriceKey, string> => ({
+  price1: String(settings.price1),
+  price2: String(settings.price2),
+  price3: String(settings.price3),
+})
 
 function lastFetchedAt(login: LoginState, settings: Settings): number {
   const account = login.accounts.find(a => a.id === settings.accountId) ?? login.accounts[0]
@@ -71,6 +79,8 @@ export function SettingsPage({ initial }: { initial: InitialState }) {
   const dismiss = Navigation.useDismiss()
   const [login, setLogin] = useState(initial.login)
   const [settings, setSettings] = useState(initial.settings)
+  // 单价要能打出“0.”这样的中间状态，所以输入框绑定文字，不绑定解析后的数字。
+  const [priceText, setPriceText] = useState(priceTexts(initial.settings))
   const [fetchedAt, setFetchedAt] = useState(initial.fetchedAt)
   const [phone, setPhone] = useState(initial.login.phone)
   const [password, setPassword] = useState('')
@@ -81,6 +91,7 @@ export function SettingsPage({ initial }: { initial: InitialState }) {
   const [wantsRelogin, setWantsRelogin] = useState(false)
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState('')
+  const [report, setReport] = useState('')
 
   const selectedAccount = login.accounts.find(a => a.id === settings.accountId) ?? login.accounts[0] ?? null
   const showForm = !login.signedIn || !!login.block || wantsRelogin
@@ -163,6 +174,13 @@ export function SettingsPage({ initial }: { initial: InitialState }) {
       Widget.reloadAll()
     })
 
+  const diagnose = () =>
+    guarded(async () => {
+      setReport('')
+      setReport(await service.diagnoseDaily(selectedAccount?.id))
+      setLogin(service.state())
+    })
+
   const erase = async () => {
     const confirmed = await Dialog.confirm({
       title: '退出并清除数据',
@@ -178,7 +196,9 @@ export function SettingsPage({ initial }: { initial: InitialState }) {
       return
     }
     setLogin(service.state())
-    setSettings(loadSettings())
+    const defaults = loadSettings()
+    setSettings(defaults)
+    setPriceText(priceTexts(defaults))
     setPhone('')
     setPassword('')
     setNeedsSms(false)
@@ -204,15 +224,21 @@ export function SettingsPage({ initial }: { initial: InitialState }) {
     return Number.isFinite(value) && value > 0 ? value : 0
   }
 
+  const changePrice = (key: PriceKey, text: string) => {
+    setPriceText({ ...priceText, [key]: text })
+    const price = parseFloat(text)
+    update({ [key]: Number.isFinite(price) && price > 0 ? price : 0 })
+  }
+
   return (
     <NavigationStack>
       <List navigationTitle="国网电费" navigationBarTitleDisplayMode="inline" toolbar={{ cancellationAction: <Button title="完成" action={dismiss} /> }}>
         <Section
           header={<Text>账号</Text>}
-          footer={<Text>只在这台手机上直连国网，不经过其他服务器。不保存明文密码；用来自动续登录的密码 MD5 存在本脚本的钥匙串里，不同步 iCloud。</Text>}
+          footer={<Text>只在这台手机上直连国网，不经过其他服务器。不保存明文密码；用来自动续登录的密码 MD5 存在本脚本的钥匙串里，不同步 iCloud。登录到期后会自动续，只有国网要求短信验证或密码变了才需要你处理。</Text>}
         >
           {login.signedIn ? <LabeledContent title="账号" value={maskTail(login.phone)} /> : null}
-          {login.signedIn && login.sessionExpiresAt ? <LabeledContent title="登录有效期至" value={formatTime(login.sessionExpiresAt)} /> : null}
+          {login.signedIn && login.sessionExpiresAt ? <LabeledContent title="本次登录到期" value={formatTime(login.sessionExpiresAt)} /> : null}
           {login.block ? <Text foregroundStyle="systemOrange">已暂停自动更新：{login.block.message}。处理好之前小组件不会再联网。</Text> : null}
           {showForm ? <Field title="手机号" prompt="网上国网登录手机号" value={phone} onChanged={setPhone} keyboardType="phonePad" disabled={busy} /> : null}
           {showForm ? (
@@ -236,14 +262,14 @@ export function SettingsPage({ initial }: { initial: InitialState }) {
             <Picker title="默认户号" value={selectedAccount?.id ?? ''} onChanged={(id: string) => update({ accountId: id })} pickerStyle="menu">
               {login.accounts.map(account => (
                 <Text key={account.id} tag={account.id}>
-                  {`${account.name} ${maskTail(account.consNoSrc)}`}
+                  {`${accountDisplayName(account)} ${maskTail(account.consNoSrc)}`}
                 </Text>
               ))}
             </Picker>
             {selectedAccount ? (
               <Field
                 title="显示名称"
-                prompt={selectedAccount.name}
+                prompt={accountDisplayName(selectedAccount)}
                 value={settings.names[selectedAccount.id] ?? ''}
                 onChanged={text => update({ names: { ...settings.names, [selectedAccount.id]: text } })}
               />
@@ -251,9 +277,12 @@ export function SettingsPage({ initial }: { initial: InitialState }) {
           </Section>
         ) : null}
 
-        <Section header={<Text>阶梯电价</Text>} footer={<Text>各地档位不同，请按当地标准填写年度分档用量。留空就不显示阶梯。今年累计是估算值：已结算电量加上结算后的每日用电，以官方账单为准。</Text>}>
-          <Field title="第二档起点（度/年）" prompt="例如 2880" value={settings.tier2 > 0 ? String(settings.tier2) : ''} keyboardType="numberPad" onChanged={text => update({ tier2: parseTier(text) })} />
-          <Field title="第三档起点（度/年）" prompt="例如 4800" value={settings.tier3 > 0 ? String(settings.tier3) : ''} keyboardType="numberPad" onChanged={text => update({ tier3: parseTier(text) })} />
+        <Section header={<Text>阶梯电价</Text>} footer={<Text>默认是北京一户一表、不满 1 千伏的标准。其他地区或申请过多人口调整的家庭，请改成实际标准；清空后恢复默认。今年累计和本月电费都是估算值，以官方账单为准。</Text>}>
+          <Field title="第二档起点（度/年）" prompt={String(DEFAULT_SETTINGS.tier2)} value={settings.tier2 > 0 ? String(settings.tier2) : ''} keyboardType="numberPad" onChanged={text => update({ tier2: parseTier(text) })} />
+          <Field title="第三档起点（度/年）" prompt={String(DEFAULT_SETTINGS.tier3)} value={settings.tier3 > 0 ? String(settings.tier3) : ''} keyboardType="numberPad" onChanged={text => update({ tier3: parseTier(text) })} />
+          <Field title="第一档电价（元/度）" prompt={String(DEFAULT_SETTINGS.price1)} value={priceText.price1} keyboardType="decimalPad" onChanged={text => changePrice('price1', text)} />
+          <Field title="第二档电价（元/度）" prompt={String(DEFAULT_SETTINGS.price2)} value={priceText.price2} keyboardType="decimalPad" onChanged={text => changePrice('price2', text)} />
+          <Field title="第三档电价（元/度）" prompt={String(DEFAULT_SETTINGS.price3)} value={priceText.price3} keyboardType="decimalPad" onChanged={text => changePrice('price3', text)} />
         </Section>
 
         <Section header={<Text>小组件</Text>} footer={<Text>国网的每日数据通常延迟一两天，刷新太频繁没有意义，也更容易触发风控。实际刷新时间由 iOS 决定。</Text>}>
@@ -275,9 +304,11 @@ export function SettingsPage({ initial }: { initial: InitialState }) {
           <Button title="预览中号" action={() => preview('systemMedium')} />
         </Section>
 
-        <Section header={<Text>数据</Text>}>
+        <Section header={<Text>数据</Text>} footer={<Text>“诊断每日数据”会多查三次国网，只显示条数、日期、读数和字段名，不含账号和户号，可以截图发给别人看。</Text>}>
           {fetchedAt > 0 ? <LabeledContent title="上次更新" value={formatTime(fetchedAt)} /> : null}
           <Button title={busy ? '处理中…' : '立即刷新'} action={refresh} disabled={busy || !login.signedIn || !!login.block} />
+          <Button title="诊断每日数据" action={diagnose} disabled={busy || !login.signedIn || !!login.block} />
+          {report ? <Text font="caption">{report}</Text> : null}
           <Button title="退出并清除全部数据" role="destructive" action={erase} disabled={busy} />
         </Section>
       </List>

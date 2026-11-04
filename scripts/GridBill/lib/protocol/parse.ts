@@ -52,13 +52,21 @@ const firstOf = (source: Json, ...keys: string[]) => {
   return ''
 }
 
+/**
+ * 真机上 consName 返回的是加密串，形如 99:<32 位十六进制>:02:osg-uc:<时间>:002，每次登录都不一样。
+ * 这种值不能当名字显示，也不能当户号的固定标识。
+ */
+export const isOpaque = (value: string) => /^\d+:[0-9a-fA-F]{8,}/.test(value)
+
+const firstReadable = (raw: Json, keys: string[]) => keys.map(key => firstOf(raw, key)).find(value => value && !isOpaque(value)) ?? ''
+
 export function parseAccounts(userInfo: unknown): Account[] {
   if (!isObject(userInfo)) return []
   const seen = new Set<string>()
   const accounts: Account[] = []
   for (const raw of objects(userInfo.powerUserList)) {
     const consNo = firstOf(raw, 'powerUserNo', 'consNo')
-    const id = firstOf(raw, 'id', 'userId', 'consNo_dst', 'powerUserNo_dst') || consNo
+    const id = firstReadable(raw, ['id', 'userId', 'consNo_dst', 'powerUserNo_dst']) || consNo
     if (!consNo || !id || seen.has(id)) continue
     seen.add(id)
     accounts.push({
@@ -68,7 +76,8 @@ export function parseAccounts(userInfo: unknown): Account[] {
       provinceCode: firstOf(raw, 'proNo', 'provinceId'),
       orgNo: firstOf(raw, 'orgNo'),
       elecType: firstOf(raw, 'elecType', 'constType'),
-      name: firstOf(raw, 'consName', 'userName', 'nickname', 'loginAccount') || '用电户号',
+      // 不用 userName、loginAccount 兜底：它们可能是手机号，会被显示在桌面上。
+      name: firstReadable(raw, ['consName_dst', 'consName', 'nickname']) || '用电户号',
     })
   }
   return accounts

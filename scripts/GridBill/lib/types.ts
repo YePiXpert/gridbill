@@ -65,18 +65,29 @@ export type Settings = {
   accountId: string | null
   /** 户号 id → 自定义显示名 */
   names: Record<string, string>
-  /** 第二档、第三档起点（度/年），0 表示未设置，不显示阶梯 */
+  /** 第二档、第三档起点（度/年） */
   tier2: number
   tier3: number
+  /** 三档单价（元/度） */
+  price1: number
+  price2: number
+  price3: number
   chartDays: number
   refreshHours: number
 }
 
+/**
+ * 阶梯默认值是北京“一户一表、不满 1 千伏”的标准。
+ * 来源：北京市销售电价表（beijing.gov.cn，2020 年 11 月），每户每月 240、400 度分档，按年累计就是 2880、4800 度。
+ */
 export const DEFAULT_SETTINGS: Settings = {
   accountId: null,
   names: {},
-  tier2: 0,
-  tier3: 0,
+  tier2: 2880,
+  tier3: 4800,
+  price1: 0.4883,
+  price2: 0.5383,
+  price3: 0.7883,
   chartDays: 14,
   refreshHours: 12,
 }

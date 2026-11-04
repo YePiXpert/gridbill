@@ -333,6 +333,11 @@ export class SgccClient {
   }
 
   async dailyUsage(session: Session, account: Account, startDay: string, endDay: string): Promise<{ readings: DailyUsage[]; totalKwh: number | null }> {
+    return parseDaily(await this.dailyRaw(session, account, startDay, endDay))
+  }
+
+  /** 未解析的响应，“诊断”按钮用它看国网实际返回了什么。 */
+  async dailyRaw(session: Session, account: Account, startDay: string, endDay: string): Promise<Json> {
     const payload = {
       serviceCode: 'BCP_000026',
       source: 'app',
@@ -355,7 +360,7 @@ export class SgccClient {
         userName: 'acctid01',
       },
     }
-    return parseDaily(unwrapBusiness(await this.post(PATH_DAILY, payload, session), '每日用电查询'))
+    return unwrapBusiness(await this.post(PATH_DAILY, payload, session), '每日用电查询')
   }
 
   async monthlyBills(session: Session, account: Account, year: number): Promise<YearlyBilling> {

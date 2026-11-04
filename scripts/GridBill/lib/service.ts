@@ -9,12 +9,16 @@
  */
 import { md5Hex } from './protocol/bytes'
 import { APP_KEYS, chinaTime, SgccClient, SgccError, type Transport } from './protocol/client'
+import { parseNumber } from './protocol/parse'
 import { DEFAULT_SETTINGS, type Account, type DailyUsage, type Session, type Settings, type Snapshot } from './types'
 import { buildBillView, demoSnapshot, type BillView } from './view-model'
 import { loadSettings, vault, type Block } from './vault'
 
 const MINUTE = 60 * 1000
 const HOUR = 60 * MINUTE
+const DAY = 24 * HOUR
+/** 比柱状图最多的 21 天宽一些：国网的每日数据有延迟，缺的日子也不会算进去。 */
+const ROLLING_WINDOW_DAYS = 34
 const MIN_QUERY_INTERVAL = 30 * MINUTE
 const MIN_AUTO_LOGIN_INTERVAL = 12 * HOUR
 const SESSION_MARGIN = 5 * MINUTE
@@ -66,6 +70,8 @@ function monthRange(year: number, month: number): [string, string] {
   const p = (n: number) => String(n).padStart(2, '0')
   return [`${year}-${p(month)}-01`, `${year}-${p(month)}-${p(new Date(Date.UTC(year, month, 0)).getUTCDate())}`]
 }
+
+const previousMonthRange = (year: number, month: number) => (month === 1 ? monthRange(year - 1, 12) : monthRange(year, month - 1))
 
 const lastDayOfMonth = (yearMonth: string) => {
   const [year, month] = yearMonth.split('-').map(Number)
@@ -180,24 +186,40 @@ export function createService(
     }
     const settledThrough = lastBill ? lastBill.endDay ?? lastDayOfMonth(lastBill.month) : null
 
-    // 上个月的每日数据只在真正需要时才查，少发一次请求。
-    const readings: DailyUsage[] = [...(currentDaily?.readings ?? [])]
-    const previousMonth = today.month === 1 ? [today.year - 1, 12] : [today.year, today.month - 1]
-    const [previousStart, previousEnd] = monthRange(previousMonth[0], previousMonth[1])
-    const usable = readings.filter(day => day.kwh !== null).length
-    if (usable < settings.chartDays || (settledThrough !== null && settledThrough < previousEnd)) {
+    // 合并多次查询的结果：后查到的覆盖先查到的，但占位行不能盖掉真实读数。
+    const byDay = new Map<string, DailyUsage>()
+    const merge = (rows: DailyUsage[]) => {
+      for (const row of rows) {
+        if (row.kwh !== null || !byDay.has(row.day)) byDay.set(row.day, row)
+      }
+    }
+    const usableDays = () => [...byDay.values()].filter(day => day.kwh !== null).length
+    // 先放上次存下的读数：这次接口少返回几天，柱状图和阶梯估算也不会倒退，攒够之后还能少发请求。
+    merge(previous?.daily ?? [])
+    merge(currentDaily?.readings ?? [])
+
+    // 上个月还没出账时，阶梯估算要用它的每日数据。缓存里可能缺月底那几天，所以必须查整月。
+    const [previousStart, previousEnd] = previousMonthRange(today.year, today.month)
+    const previousUnsettled = settledThrough !== null && settledThrough < previousEnd
+    if (previousUnsettled || usableDays() < settings.chartDays) {
       const lastMonth = await attempt(() => client.dailyUsage(session, account, previousStart, previousEnd))
-      if (lastMonth.ok) readings.push(...lastMonth.value.readings)
+      if (lastMonth.ok) merge(lastMonth.value.readings)
+    }
+
+    // 还不够就再试一次滚动窗口。真机上出现过查完整月仍只有几天读数的情况，原因还没查明，“诊断每日数据”就是查这个的。
+    // 这一步只是补充，连网络错误也不能让整次更新作废。
+    if (usableDays() < settings.chartDays) {
+      const rolling = await attempt(() => client.dailyUsage(session, account, chinaTime(t - ROLLING_WINDOW_DAYS * DAY).isoDay, today.isoDay), true)
+      if (rolling.ok) merge(rolling.value.readings)
     }
 
     // 余额是附加数据，接口也因地区而异，所以连网络错误都容忍。
     const balanceResult = await attempt(() => client.balance(session, account), true)
 
-    if (!current.ok && !billingResult.ok && !balanceResult.ok && readings.length === 0) {
+    if (!current.ok && !billingResult.ok && !balanceResult.ok && byDay.size === 0) {
       throw firstProblem ?? new SgccError('business', 'empty', '国网没有返回任何数据')
     }
 
-    const byDay = new Map(readings.map(day => [day.day, day]))
     const daily = [...byDay.values()].sort((a, b) => a.day.localeCompare(b.day))
     const thisMonth = daily.filter(day => day.day >= monthStart && day.day <= monthEnd)
     const monthKwh = currentDaily?.totalKwh ?? (thisMonth.some(day => day.kwh !== null) ? round(sumKwh(thisMonth)) : null)
@@ -296,6 +318,55 @@ export function createService(
       }
     },
 
+    /**
+     * 用户点“诊断每日数据”时运行：分别按本月、上月、滚动窗口查一次，报告国网实际返回了什么。
+     * 只有条数、日期、读数和字段名，没有账号、户号和登录凭证，可以放心截图。
+     * 和其他联网操作守同样的规矩：闸门关着就不联网，遇到风控等问题要把闸门关上。
+     */
+    async diagnoseDaily(accountId?: string | null): Promise<string> {
+      const block = vault.gate().block
+      if (block) throw new SgccError(block.kind, 'blocked', blockMessage(block))
+      const credentials = vault.credentials()
+      const accounts = vault.accounts()
+      const account = accounts.find(a => a.id === accountId) ?? accounts[0]
+      if (!credentials || !account) throw new SgccError('credentials', 'no-account', '请先登录')
+      try {
+        const session = validSession() ?? (await login('interactive'))
+        const client = clientFor(credentials.phone)
+        const t = now()
+        const today = chinaTime(t)
+        const probes: Array<[string, string, string]> = [
+          ['本月', ...monthRange(today.year, today.month)],
+          ['上月', ...previousMonthRange(today.year, today.month)],
+          ['最近35天', chinaTime(t - ROLLING_WINDOW_DAYS * DAY).isoDay, today.isoDay],
+        ]
+        const lines: string[] = []
+        for (const [label, start, end] of probes) {
+          lines.push(`【${label}】${start} ~ ${end}`)
+          try {
+            const raw = await client.dailyRaw(session, account, start, end)
+            const rows: Array<Record<string, unknown>> = Array.isArray(raw.sevenEleList) ? raw.sevenEleList : []
+            const valid = rows.filter(row => parseNumber(row.dayElePq) !== null).length
+            lines.push(`返回 ${rows.length} 行，有读数 ${valid} 行，totalPq=${String(raw.totalPq)}`)
+            lines.push(`响应字段：${Object.keys(raw).join(', ')}`)
+            if (rows.length > 0) {
+              const describe = (row: Record<string, unknown>) => `${String(row.day)}=${String(row.dayElePq)}`
+              lines.push(`前两行：${rows.slice(0, 2).map(describe).join('  ')}`)
+              lines.push(`后两行：${rows.slice(-2).map(describe).join('  ')}`)
+              lines.push(`行字段：${Object.keys(rows[0]).join(', ')}`)
+            }
+          } catch (error) {
+            if (error instanceof SgccError && error.kind !== 'business' && error.kind !== 'network') throw error
+            lines.push(`失败：${error instanceof SgccError ? `${error.code} ${error.message}` : '未知错误'}`)
+          }
+        }
+        return lines.join('\n')
+      } catch (error) {
+        recordFailure(error)
+        throw error
+      }
+    },
+
     eraseAll(): void {
       vault.eraseAll()
     },
@@ -310,7 +381,7 @@ export function createService(
 
       if (parameter.toLowerCase() === 'demo') {
         const account: Account = { id: 'demo', consNo: '0000', consNoSrc: '0000', provinceCode: '', orgNo: '', elecType: '01', name: '演示' }
-        return { state: 'ok', view: buildBillView(demoSnapshot(t), account, { ...DEFAULT_SETTINGS, tier2: 2880, tier3: 4800 }, null), nextRefresh: nextNormal }
+        return { state: 'ok', view: buildBillView(demoSnapshot(t), account, DEFAULT_SETTINGS, null), nextRefresh: nextNormal }
       }
 
       if (!vault.credentials()) return { state: 'signedOut', nextRefresh: nextRetry }

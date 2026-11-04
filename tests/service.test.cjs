@@ -108,7 +108,7 @@ test('小组件：一次刷新的请求数有上限，并且数据正确', async
   const model = await service.loadWidgetModel('')
   assert.equal(model.state, 'ok')
   assert.equal(server.count('login'), 0, '会话有效时不重新登录')
-  assert.ok(server.requests.length <= 4, `实际 ${server.requests.length} 次`)
+  assert.ok(server.requests.length <= 5, `实际 ${server.requests.length} 次`)
   assert.equal(model.nextRefresh.getTime(), START + 12 * HOUR)
   const snapshot = vault.snapshot('acct-1')
   assert.equal(snapshot.monthKwh, 30.5)
@@ -119,6 +119,140 @@ test('小组件：一次刷新的请求数有上限，并且数据正确', async
   assert.equal(snapshot.yearEstimateKwh, 2050.5)
   assert.deepEqual(snapshot.daily.map(d => d.day), ['2026-10-30', '2026-10-31', '2026-11-01', '2026-11-02', '2026-11-03'])
   assert.equal(snapshot.daily[4].kwh, null, '占位符保持 null')
+})
+
+test('默认设置：按北京标准算出档位和本月电费', async () => {
+  const { service } = await signedIn()
+  const { view } = await service.loadWidgetModel('')
+  assert.equal(view.tier.level, 1)
+  assert.equal(view.tier.text, '第一档 0.4883 元/度 · 距第二档 830 度')
+  assert.equal(view.monthCost, '14.89', '30.5 度 × 0.4883')
+})
+
+test('旧版本存下的设置：没填的阶梯和单价用北京默认，填过的保留', () => {
+  resetStores()
+  saveSettings({ accountId: 'a', names: { a: '家' }, tier2: 3000, tier3: 0, chartDays: 7, refreshHours: 6 })
+  const settings = loadSettings()
+  assert.deepEqual([settings.tier2, settings.tier3], [3000, 4800])
+  assert.deepEqual([settings.price1, settings.price2, settings.price3], [0.4883, 0.5383, 0.7883])
+  assert.deepEqual([settings.accountId, settings.names.a, settings.chartDays, settings.refreshHours], ['a', '家', 7, 6])
+})
+
+/** 已结算到上月底，不需要为了阶梯估算去查上个月。 */
+const settledThroughOctober = () => ok({ yearPq: '100', list: [{ month: '202610', monthPq: '100', eleList: [{ endDate: '20261031' }] }] })
+
+/** 本月 3 天，上个整月只给 1 天，滚动窗口给满。真机上出现过读数特别少的情况，这是其中一种可能。 */
+function sparseMonthDaily(payload) {
+  const { startTime, endTime } = payload.data
+  const day = n => ({ day: `202611${String(n).padStart(2, '0')}`, dayElePq: '10' })
+  if (startTime === '2026-11-01') return ok({ totalPq: '30', sevenEleList: [day(1), day(2), day(3), { day: '20261104', dayElePq: '-' }] })
+  if (startTime === '2026-10-01' && endTime === '2026-10-31') return ok({ sevenEleList: [{ day: '20261031', dayElePq: '9' }] })
+  // 滚动窗口：10/1 到今天
+  const october = Array.from({ length: 31 }, (_, i) => ({ day: `202610${String(i + 1).padStart(2, '0')}`, dayElePq: '9' }))
+  return ok({ totalPq: '309', sevenEleList: [...october, day(1), day(2), day(3), { day: '20261104', dayElePq: '-' }] })
+}
+
+const dailyRanges = server => server.requests.filter(r => r.route === 'daily').map(r => `${r.payload.data.startTime}~${r.payload.data.endTime}`)
+
+test('整月查询读数很少时，靠滚动窗口把柱状图补满', async () => {
+  const { service, server } = await signedIn({ daily: sparseMonthDaily, monthly: settledThroughOctober })
+  const model = await service.loadWidgetModel('')
+  assert.equal(model.view.bars.length, 14)
+  assert.equal(model.view.chartSlots, 14)
+  assert.equal(model.view.latest.label, '11/3')
+  assert.deepEqual(dailyRanges(server), ['2026-11-01~2026-11-30', '2026-10-01~2026-10-31', '2026-10-01~2026-11-04'], '整月够用就不发滚动窗口')
+  assert.equal(vault.snapshot('acct-1').monthKwh, 30, '本月用电仍然取本月查询的合计')
+})
+
+test('读数攒够之后不再多查，接口少返回几天柱状图也不倒退', async () => {
+  const { service, server, clock } = await signedIn({ daily: sparseMonthDaily, monthly: settledThroughOctober })
+  await service.loadWidgetModel('')
+  server.requests.length = 0
+  server.handlers.daily = () => ok({ totalPq: '30', sevenEleList: [{ day: '20261104', dayElePq: '11' }] })
+  clock.t += 13 * HOUR
+  const model = await service.loadWidgetModel('')
+  assert.equal(server.count('daily'), 1, '只查本月')
+  assert.equal(model.view.bars.length, 14)
+  assert.equal(model.view.latest.label, '11/4')
+  assert.equal(vault.snapshot('acct-1').daily.length, 31, '存储有上限')
+})
+
+test('滚动窗口失败不影响整次更新，网络错误也一样', async () => {
+  const rollingFails = failure => payload => {
+    if (payload.data.startTime === '2026-11-01') return ok({ sevenEleList: [{ day: '20261101', dayElePq: '14' }] })
+    if (payload.data.endTime === '2026-11-04') return failure()
+    return ok({ sevenEleList: [{ day: '20261031', dayElePq: '13' }] })
+  }
+  const failures = [() => fail('9999', '不支持'), () => { throw new Error('offline') }]
+  for (const failure of failures) {
+    const { service, server } = await signedIn({ daily: rollingFails(failure) })
+    const model = await service.loadWidgetModel('')
+    assert.equal(model.state, 'ok')
+    assert.equal(model.view.notice, null)
+    assert.equal(model.view.bars.length, 2)
+    assert.equal(server.count('daily'), 3)
+    assert.ok(vault.snapshot('acct-1').balance, '后面的余额查询不能被耽误')
+  }
+})
+
+test('上个月没出账时，柱状图够用也要查整月，否则阶梯估算会漏掉月初几天', async () => {
+  const november = Array.from({ length: 16 }, (_, i) => ({ day: `202611${String(i + 1).padStart(2, '0')}`, dayElePq: '5' }))
+  const { service, server } = await signedIn({
+    daily: payload => (payload.data.startTime === '2026-11-01' ? ok({ totalPq: '80', sevenEleList: november }) : ok({ sevenEleList: [{ day: '20261001', dayElePq: '7' }] })),
+    monthly: () => ok({ yearPq: '100', list: [{ month: '202609', monthPq: '100', eleList: [{ endDate: '20260930' }] }] }),
+  })
+  await service.loadWidgetModel('')
+  assert.deepEqual(dailyRanges(server), ['2026-11-01~2026-11-30', '2026-10-01~2026-10-31'])
+  assert.equal(vault.snapshot('acct-1').yearEstimateKwh, 187)
+})
+
+test('合并多次查询时，占位行不能盖掉真实读数', async () => {
+  const { service } = await signedIn({
+    daily: payload =>
+      payload.data.startTime === '2026-11-01'
+        ? ok({ sevenEleList: [{ day: '20261101', dayElePq: '14' }, { day: '20261102', dayElePq: '-' }] })
+        : ok({ sevenEleList: [{ day: '20261101', dayElePq: '-' }, { day: '20261102', dayElePq: '9' }] }),
+  })
+  await service.loadWidgetModel('')
+  const { daily } = vault.snapshot('acct-1')
+  assert.deepEqual(daily.map(d => [d.day, d.kwh]), [['2026-11-01', 14], ['2026-11-02', 9]])
+})
+
+test('诊断：报告三次查询的条数和字段，不含账号和户号', async () => {
+  const { service, server } = await signedIn({ daily: sparseMonthDaily })
+  const report = await service.diagnoseDaily('acct-1')
+  assert.equal(server.count('daily'), 3)
+  assert.match(report, /【本月】2026-11-01 ~ 2026-11-30/)
+  assert.match(report, /返回 4 行，有读数 3 行，totalPq=30/)
+  assert.match(report, /【最近35天】2026-10-01 ~ 2026-11-04/)
+  assert.match(report, /【上月】2026-10-01 ~ 2026-10-31/)
+  assert.match(report, /返回 1 行，有读数 1 行/)
+  assert.match(report, /20261031=9/)
+  assert.match(report, /行字段：day, dayElePq/)
+  for (const secret of ['13800000000', '1100001234', 'enc-1', 'token-1', md5Hex(PASSWORD)]) {
+    assert.ok(!report.includes(secret), `诊断报告不能包含 ${secret}`)
+  }
+})
+
+test('诊断：单次查询失败不影响其他', async () => {
+  const defaults = createMockServer().handlers
+  const { service } = await signedIn({
+    daily: payload => (payload.data.endTime === '2026-11-30' ? fail('9999', '系统繁忙') : defaults.daily(payload)),
+  })
+  const report = await service.diagnoseDaily()
+  assert.match(report, /失败：9999 系统繁忙/)
+  assert.match(report, /【上月】/)
+  assert.match(report, /【最近35天】/)
+})
+
+test('诊断：遇到风控立刻停下并关上闸门，闸门关着时不联网', async () => {
+  const { service, server } = await signedIn({ daily: () => fail('RK008') })
+  await assert.rejects(service.diagnoseDaily(), error => error.kind === 'risk')
+  assert.equal(server.count('daily'), 1, '后面的查询不能再发')
+  assert.equal(service.state().block.kind, 'risk', '小组件也要停')
+  server.requests.length = 0
+  await assert.rejects(service.diagnoseDaily(), error => error.kind === 'risk')
+  assert.equal(server.requests.length, 0)
 })
 
 test('本月数据够用且已结算到上月时，不查上个月', async () => {
@@ -272,6 +406,7 @@ test('月度账单接口失败：不影响每日数据，阶梯不显示', async
   const model = await service.loadWidgetModel('')
   assert.equal(model.state, 'ok')
   assert.equal(model.view.tier, null)
+  assert.equal(model.view.monthCost, null)
   assert.equal(model.view.lastBill, null)
   assert.equal(model.view.monthKwh, '30.5')
 })
@@ -467,7 +602,7 @@ test('清除数据后什么都不剩', async () => {
   saveSettings({ ...loadSettings(), tier2: 1 })
   service.eraseAll()
   assert.equal(keychain.size, 0)
-  assert.equal(loadSettings().tier2, 0)
+  assert.equal(loadSettings().tier2, 2880, '设置也回到默认值')
   assert.equal(service.state().signedIn, false)
 })
 

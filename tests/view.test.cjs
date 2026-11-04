@@ -33,6 +33,7 @@ test('没有任何数据时全部显示占位符，不显示 0', () => {
   const v = view()
   assert.equal(v.headline.amount, '--')
   assert.equal(v.monthKwh, '--')
+  assert.equal(v.monthCost, null)
   assert.equal(v.yearKwh, '--')
   assert.equal(v.lastBill, null)
   assert.equal(v.latest, null)
@@ -64,34 +65,74 @@ test('柱状图：跳过缺失的日子，只取最近 N 天，最高的柱子�
   assert.equal(zero.bars[0].ratio, 0, '全是 0 时不能除以 0')
 })
 
-test('阶梯：未设置或设置错误时不显示', () => {
-  const estimate = { yearEstimateKwh: 1000 }
-  assert.equal(view(estimate).tier, null)
-  assert.equal(view(estimate, { tier2: 2880, tier3: 0 }).tier, null)
-  assert.equal(view(estimate, { tier2: 4800, tier3: 2880 }).tier, null)
-  assert.equal(view({}, { tier2: 2880, tier3: 4800 }).tier, null)
+test('默认值是北京一户一表、不满 1 千伏的标准', () => {
+  const { tier2, tier3, price1, price2, price3 } = DEFAULT_SETTINGS
+  assert.deepEqual([tier2, tier3], [240 * 12, 400 * 12])
+  assert.deepEqual([price1, price2, price3], [0.4883, 0.5383, 0.7883])
 })
 
-test('阶梯：三档的进度和文字', () => {
+test('阶梯：设置错误或没有累计数据时不显示', () => {
+  const estimate = { yearEstimateKwh: 1000 }
+  assert.ok(view(estimate).tier, '默认设置下要显示')
+  assert.equal(view(estimate, { tier2: 0, tier3: 0 }).tier, null)
+  assert.equal(view(estimate, { tier2: 2880, tier3: 0 }).tier, null)
+  assert.equal(view(estimate, { tier2: 4800, tier3: 2880 }).tier, null)
+  assert.equal(view().tier, null)
+})
+
+test('阶梯：三档的进度、单价和文字', () => {
   const settings = { tier2: 2000, tier3: 4000 }
   const first = view({ yearEstimateKwh: 1000 }, settings).tier
   assert.deepEqual(first.segments, [0.5, 0, 0])
   assert.equal(first.level, 1)
-  assert.equal(first.text, '第一档 · 距第二档 1,000 度')
+  assert.equal(first.text, '第一档 0.4883 元/度 · 距第二档 1,000 度')
   const second = view({ yearEstimateKwh: 3000 }, settings).tier
   assert.deepEqual(second.segments, [1, 0.5, 0])
   assert.equal(second.level, 2)
+  assert.equal(second.text, '第二档 0.5383 元/度 · 距第三档 1,000 度')
   const third = view({ yearEstimateKwh: 5000 }, settings).tier
   assert.deepEqual(third.segments, [1, 1, 0.5])
   assert.equal(third.level, 3)
-  assert.equal(third.text, '第三档 · 已超出 1,000 度')
+  assert.equal(third.text, '第三档 0.7883 元/度 · 已超出 1,000 度')
   assert.deepEqual(view({ yearEstimateKwh: 2000 }, settings).tier.segments, [1, 0, 0], '正好踩线还算第一档')
   assert.equal(view({ yearEstimateKwh: 2000 }, settings).tier.level, 1)
+})
+
+test('本月电费：按本月这段用电落在哪几档分别计价', () => {
+  const cost = (monthKwh, yearEstimateKwh, settings) => view({ monthKwh, yearEstimateKwh }, settings).monthCost
+  assert.equal(cost(100, 1000), '48.83', '全在第一档')
+  assert.equal(cost(100, 4000), '53.83', '全在第二档')
+  assert.equal(cost(100, 6000), '78.83', '全在第三档')
+  assert.equal(cost(100, 2900), '49.83', '跨第一、二档：80×0.4883 + 20×0.5383')
+  assert.equal(cost(100, 4850), '66.33', '跨第二、三档：50×0.5383 + 50×0.7883')
+  assert.equal(cost(5000, 5000), '2597.50', '三档都跨到')
+  assert.equal(cost(0, 1000), '0.00')
+  assert.equal(cost(100, 4000, { price2: 0.6 }), '60.00', '单价可以改')
+})
+
+test('本月电费：累计比本月还少时不会算少，缺数据时不显示', () => {
+  const cost = (monthKwh, yearEstimateKwh, settings) => view({ monthKwh, yearEstimateKwh }, settings).monthCost
+  assert.equal(cost(100, 40), '48.83')
+  assert.equal(cost(null, 1000), null)
+  assert.equal(cost(100, null), null)
+  assert.equal(cost(100, 1000, { tier2: 0, tier3: 0 }), null, '档位设置不对时算不出来')
 })
 
 test('显示名称优先用自定义的', () => {
   assert.equal(view().title, '张*')
   assert.equal(view({}, { names: { a: '老家' } }).title, '老家')
+})
+
+test('之前保存的加密户名不显示，自定义名称不受影响', () => {
+  const opaque = { ...ACCOUNT, name: '99:0123456789abcdef0123456789abcdef:02:osg-uc:2601010000:001' }
+  assert.equal(buildBillView(base, opaque, DEFAULT_SETTINGS, null).title, '用电户号')
+  assert.equal(buildBillView(base, opaque, { ...DEFAULT_SETTINGS, names: { a: '老家' } }, null).title, '老家')
+})
+
+test('图表格数跟随设置，和实际读数多少无关', () => {
+  const daily = [{ day: '2026-11-01', kwh: 5, yuan: null }]
+  assert.equal(view({ daily }, { chartDays: 21 }).chartSlots, 21)
+  assert.equal(view({ daily }).bars.length, 1)
 })
 
 test('更新时间按北京时间显示', () => {

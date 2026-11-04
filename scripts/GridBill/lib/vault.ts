@@ -69,8 +69,12 @@ export function loadSettings(): Settings {
   return {
     accountId: typeof stored.accountId === 'string' ? stored.accountId : DEFAULT_SETTINGS.accountId,
     names: typeof stored.names === 'object' && stored.names !== null ? stored.names : {},
-    tier2: positive(stored.tier2),
-    tier3: positive(stored.tier3),
+    // 没填或清空都用默认值（旧版本把没填的存成 0）。
+    tier2: positive(stored.tier2) || DEFAULT_SETTINGS.tier2,
+    tier3: positive(stored.tier3) || DEFAULT_SETTINGS.tier3,
+    price1: positive(stored.price1) || DEFAULT_SETTINGS.price1,
+    price2: positive(stored.price2) || DEFAULT_SETTINGS.price2,
+    price3: positive(stored.price3) || DEFAULT_SETTINGS.price3,
     chartDays: positive(stored.chartDays) || DEFAULT_SETTINGS.chartDays,
     refreshHours: positive(stored.refreshHours) || DEFAULT_SETTINGS.refreshHours,
   }

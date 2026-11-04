@@ -10,7 +10,7 @@ const { WidgetRoot, amountFontSize } = require('../.build/GridBill/ui/widget-vie
 const { SettingsPage, loadInitialState } = require('../.build/GridBill/ui/settings')
 const { buildBillView, demoSnapshot } = require('../.build/GridBill/lib/view-model')
 const { DEFAULT_SETTINGS } = require('../.build/GridBill/lib/types')
-const { vault } = require('../.build/GridBill/lib/vault')
+const { loadSettings, vault } = require('../.build/GridBill/lib/vault')
 
 const ACCOUNT = { id: 'a', name: '张*', consNo: '', consNoSrc: '1100001234', provinceCode: '', orgNo: '', elecType: '01' }
 const NOW = Date.UTC(2026, 10, 4)
@@ -47,9 +47,13 @@ for (const [family, size] of [['systemMedium', { width: 338, height: 158 }], ['s
     }
   })
 
-  test(`${family}：阶梯未设置时不画，设置后画三段`, () => {
-    assert.equal(findAll(render({ state: 'ok', view: demoView(), nextRefresh: next }, family, size), 'ProgressView').length, 0)
-    const segments = findAll(render({ state: 'ok', view: demoView({ tier2: 2880, tier3: 4800 }), nextRefresh: next }, family, size), 'ProgressView')
+  test(`${family}：默认画三段阶梯和本月电费，档位设置不对时都不画`, () => {
+    const off = render({ state: 'ok', view: demoView({ tier2: 0, tier3: 0 }), nextRefresh: next }, family, size)
+    assert.equal(findAll(off, 'ProgressView').length, 0)
+    assert.doesNotMatch(texts(off).join(' '), /约 /)
+    const on = render({ state: 'ok', view: demoView(), nextRefresh: next }, family, size)
+    assert.match(texts(on).join(' '), /约 67\.09 元/)
+    const segments = findAll(on, 'ProgressView')
     assert.equal(segments.length, 3)
     assert.equal(segments[0].props.progressViewStyle, 'linear')
     assert.ok(segments[0].props.value > 0 && segments[0].props.value <= segments[0].props.total)
@@ -76,6 +80,19 @@ for (const [family, size] of [['systemMedium', { width: 338, height: 158 }], ['s
     walk(tree)
   })
 }
+
+test('读数很少时柱子不会变粗：前面补细线占满格数', () => {
+  const days = ['2026-10-31', '2026-11-01', '2026-11-02', '2026-11-03']
+  const snapshot = { ...demoSnapshot(NOW), daily: days.map(day => ({ day, kwh: 14, yuan: null })) }
+  const view = buildBillView(snapshot, ACCOUNT, DEFAULT_SETTINGS, null)
+  const shapes = findAll(render({ state: 'ok', view, nextRefresh: next }), 'RoundedRectangle')
+  assert.equal(shapes.length, 14, '格数固定，宽度才固定')
+  const placeholders = shapes.filter(shape => String(shape.props.key).startsWith('empty-'))
+  assert.equal(placeholders.length, 10)
+  assert.ok(placeholders.every(shape => shape.props.frame.maxHeight === 2))
+  assert.equal(shapes.slice(0, 10).every(shape => String(shape.props.key).startsWith('empty-')), true, '占位在前，最新一天靠右')
+  assert.equal(shapes[13].props.widgetAccentable, true)
+})
 
 test('金额越长字号越小', () => {
   assert.equal(amountFontSize('88.35', 28), 28)
@@ -145,6 +162,68 @@ test('设置页：已登录时隐藏表单，账号打码', () => {
   assert.equal(button(tree, '立即刷新').props.disabled, false)
   assert.ok(findAll(tree, 'Picker').length >= 3, '默认户号、刷新间隔、柱状图天数')
   assert.ok(!JSON.stringify(tree).includes('13812345678'), '界面上不能出现完整手机号')
+})
+
+test('设置页：户号列表不显示加密户名，已登录时有诊断按钮', () => {
+  resetStores()
+  vault.saveCredentials({ phone: '13812345678', passwordMd5: 'x' })
+  vault.saveSession({ token: 't', userId: 'u', province: '', expiresAt: Date.now() + 86400000 })
+  vault.saveAccounts([{ ...ACCOUNT, name: '99:0123456789abcdef0123456789abcdef:02:osg-uc:2601010000:001' }])
+  const tree = renderSettings()
+  assert.ok(!JSON.stringify(tree).includes('osg-uc'))
+  assert.equal(button(tree, '诊断每日数据').props.disabled, false)
+})
+
+/** 真的保存状态的 useState，用来验证输入框连续输入时的表现。 */
+function mountSettings() {
+  const slots = []
+  let cursor = 0
+  const original = fake.useState
+  fake.useState = initial => {
+    const index = cursor++
+    if (!(index in slots)) slots[index] = typeof initial === 'function' ? initial() : initial
+    return [slots[index], value => { slots[index] = value }]
+  }
+  const initial = loadInitialState()
+  return {
+    field(title) {
+      cursor = 0
+      return findAll(expand(createElement(SettingsPage, { initial })), 'TextField').find(node => node.props.title === title)
+    },
+    restore() {
+      fake.useState = original
+    },
+  }
+}
+
+test('设置页：阶梯和单价已经按北京标准填好', () => {
+  resetStores()
+  const fields = findAll(renderSettings(), 'TextField')
+  const value = title => fields.find(node => node.props.title === title).props.value
+  assert.equal(value('第二档起点（度/年）'), '2880')
+  assert.equal(value('第三档起点（度/年）'), '4800')
+  assert.equal(value('第一档电价（元/度）'), '0.4883')
+  assert.equal(value('第二档电价（元/度）'), '0.5383')
+  assert.equal(value('第三档电价（元/度）'), '0.7883')
+})
+
+test('设置页：单价能一个字一个字地输入，“0.”不会被吞掉；清空后恢复默认', () => {
+  resetStores()
+  const page = mountSettings()
+  try {
+    const TITLE = '第一档电价（元/度）'
+    assert.equal(page.field(TITLE).props.keyboardType, 'decimalPad')
+    for (const text of ['0', '0.', '0.5', '0.52']) {
+      page.field(TITLE).props.onChanged(text)
+      assert.equal(page.field(TITLE).props.value, text, `输入 ${text} 之后不能被改写`)
+    }
+    assert.equal(loadSettings().price1, 0.52)
+    page.field(TITLE).props.onChanged('')
+    assert.equal(page.field(TITLE).props.value, '')
+    assert.equal(loadSettings().price1, 0.4883)
+  } finally {
+    page.restore()
+  }
 })
 
 test('设置页：被闸门拦下时提示并要求重新登录', () => {

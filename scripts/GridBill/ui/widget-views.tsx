@@ -9,6 +9,7 @@ import { PLACEHOLDER, type BillView, type Tone } from '../lib/view-model'
 const BACKGROUND = { light: '#FFFFFF', dark: '#1C1C1E' }
 const ACCENT = { light: '#0B8F7E', dark: '#3AD6BF' }
 const ACCENT_SOFT = { light: 'rgba(11,143,126,0.32)', dark: 'rgba(58,214,191,0.34)' }
+const TRACK = { light: 'rgba(60,60,67,0.12)', dark: 'rgba(235,235,245,0.16)' }
 const TIER_COLORS = ['systemGreen', 'systemOrange', 'systemRed']
 const SECONDARY = 'secondaryLabel'
 const TERTIARY = 'tertiaryLabel'
@@ -84,9 +85,12 @@ function Stat({ label, value, unit }: { label: string; value: string; unit: stri
   )
 }
 
-/** 每根柱子宽度弹性、高度固定，HStack 会把可用宽度平分。 */
+/**
+ * 图表固定 chartSlots 格，HStack 把可用宽度平分。
+ * 读数不够时前面补细线占位，否则只有几天数据时柱子会被撑成粗块。
+ */
 function Bars({ view, height }: { view: BillView; height: number }) {
-  const { bars } = view
+  const { bars, chartSlots } = view
   if (bars.length === 0) {
     return (
       <Text font={11} foregroundStyle={TERTIARY} frame={{ maxWidth: 'infinity', minHeight: height, maxHeight: height, alignment: 'leading' }}>
@@ -95,7 +99,10 @@ function Bars({ view, height }: { view: BillView; height: number }) {
     )
   }
   return (
-    <HStack alignment="bottom" spacing={bars.length > 10 ? 2 : 3} frame={{ maxWidth: 'infinity', minHeight: height, maxHeight: height, alignment: 'bottomLeading' }}>
+    <HStack alignment="bottom" spacing={chartSlots > 10 ? 2 : 3} frame={{ maxWidth: 'infinity', minHeight: height, maxHeight: height, alignment: 'bottomLeading' }}>
+      {Array.from({ length: Math.max(0, chartSlots - bars.length) }, (_, index) => (
+        <RoundedRectangle key={`empty-${index}`} fill={TRACK} cornerRadius={1} frame={{ maxWidth: 'infinity', minHeight: 2, maxHeight: 2 }} />
+      ))}
       {bars.map((bar, index) => {
         const isLatest = index === bars.length - 1
         const barHeight = Math.max(2, bar.ratio * height)
@@ -111,6 +118,11 @@ function Bars({ view, height }: { view: BillView; height: number }) {
       })}
     </HStack>
   )
+}
+
+function latestLine({ latest, monthCost }: BillView): string {
+  if (!latest) return '每日数据通常延迟一两天'
+  return monthCost ? `最新 ${latest.label} ${latest.kwh} 度 · 本月约 ${monthCost} 元` : `最新 ${latest.label} 用电 ${latest.kwh} 度`
 }
 
 /** 三段等宽，每段表示这一档用了多少。 */
@@ -132,8 +144,8 @@ function SmallView({ view }: { view: BillView }) {
       <Spacer />
       <Amount view={view} size={26} />
       <Spacer />
-      <Text font={11} foregroundStyle={SECONDARY} lineLimit={1} padding={{ bottom: 3 }}>
-        {`本月 ${view.monthKwh} 度`}
+      <Text font={11} foregroundStyle={SECONDARY} lineLimit={1} minScaleFactor={0.8} padding={{ bottom: 3 }}>
+        {view.monthCost ? `本月 ${view.monthKwh} 度 · 约 ${view.monthCost} 元` : `本月 ${view.monthKwh} 度`}
       </Text>
       <Bars view={view} height={view.tier ? 16 : 22} />
       {view.tier ? (
@@ -169,8 +181,8 @@ function MediumView({ view }: { view: BillView }) {
         </HStack>
         <Spacer />
         <Bars view={view} height={view.tier ? 28 : 44} />
-        <Text font={10} foregroundStyle={SECONDARY} lineLimit={1} padding={{ top: 3 }}>
-          {view.latest ? `最新 ${view.latest.label} 用电 ${view.latest.kwh} 度` : '每日数据通常延迟一两天'}
+        <Text font={10} foregroundStyle={SECONDARY} lineLimit={1} minScaleFactor={0.8} padding={{ top: 3 }}>
+          {latestLine(view)}
         </Text>
         {view.tier ? (
           <VStack alignment="leading" spacing={2} padding={{ top: 5 }} frame={{ maxWidth: 'infinity' }}>

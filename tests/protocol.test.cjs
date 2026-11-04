@@ -295,6 +295,27 @@ test('账户解析：去重、回退字段', () => {
   assert.deepEqual(parse.parseAccounts(null), [])
 })
 
+test('户名：跳过真机上见过的加密串，不用可能是手机号的字段兜底', () => {
+  const OPAQUE = '99:0123456789abcdef0123456789abcdef:02:osg-uc:2601010000:001'
+  const nameOf = raw => parse.parseAccounts({ powerUserList: [{ id: '1', powerUserNo: 'a', ...raw }] })[0].name
+  assert.equal(nameOf({ consName: OPAQUE }), '用电户号')
+  assert.equal(nameOf({ consName: OPAQUE, consName_dst: '张*' }), '张*')
+  assert.equal(nameOf({ consName: '家庭' }), '家庭')
+  assert.equal(nameOf({ consName: OPAQUE, nickname: '老家' }), '老家')
+  assert.equal(nameOf({ userName: '13800000000', loginAccount: '13800000000' }), '用电户号')
+  assert.equal(parse.isOpaque(OPAQUE), true)
+  assert.equal(parse.isOpaque('3号楼'), false)
+  assert.equal(parse.isOpaque('12:30'), false)
+})
+
+test('户号标识：每次登录都会变的加密串不能当标识，否则显示名称和缓存会丢', () => {
+  const OPAQUE = '99:0123456789abcdef0123456789abcdef:02:osg-uc:2601010000:001'
+  const idOf = raw => parse.parseAccounts({ powerUserList: [{ powerUserNo: 'raw-no', ...raw }] })[0].id
+  assert.equal(idOf({ id: 'acct-1', powerUserNo_dst: '110***1234' }), 'acct-1')
+  assert.equal(idOf({ id: OPAQUE, powerUserNo_dst: '110***1234' }), '110***1234')
+  assert.equal(idOf({ id: OPAQUE }), 'raw-no')
+})
+
 test('月度账单：字段回退、取最晚结算日、按月排序', () => {
   const billing = parse.parseYearlyBilling({
     mothEleList: [
