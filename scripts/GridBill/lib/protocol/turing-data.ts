@@ -1,0 +1,63 @@
+/**
+ * 设备令牌用到的固定数据，由 hass-state-grid（MIT）的 reference_environment.json 和 jce.py 生成。
+ * 这是上游公开的安卓模拟器参考环境，不含任何账号或真实设备信息。
+ */
+
+/** 令牌公钥的模数（2048 位），指数固定为 65537。 */
+export const TURING_RSA_MODULUS =
+  'b595f83a8a0ee3c16261addfc3353e7e13c73b762c3013f53225752a9fa8b0d0c33ed7f810f0a3bb323be5e6bef036eaf2e41e0975accd2a565161f573617492197904e0b30cbc9dd7aea2e079e1de3596dcf36ef444e1f3569987d737e7753e7367e893f9cf71ea661a6de3977199adcc6937dff6c1870297eb744d6473f8fb93367d17f3f51fe229e6c5424359c95985aa3ca18299334f6b1fa2d16198accc057d1e93b76fd385774fbf040453a9dfaa51b7ce6cc8778c6bc84148ec6e9213fadb4f96a4b84728953d4546d60c98b92fbf5cd5db079f4c90c968ac8ce3edeb2f0bde85e4e6399ca97b86faee15f1ef1296e8e0e2f88e6bde00c520bb871225'
+
+export const STABLE_NATIVE_FEATURES: Readonly<Record<number, string>> = {
+  7: "",
+  8: "google/sdk_gphone64_arm64/emu64a:13/TE1A.240213.009/12342917:userdebug/dev-keys",
+  9: "/dev/block/dm-0:802660,tmpfs:1006268,tmpfs:1006268,/dev/block/dm-4:98620,/dev/block/dm-3:2122372,/dev/block/dm-2:175392,tmpfs:1006268,/dev/block/loop4:784,",
+  10: "5939.59,5939.59",
+  11: "type=1:name=Goldfish 3-axis Accelerometer:vendor=The Android Open Source Project:resolution=2.480159E-4:,type=4:name=Goldfish 3-axis Gyroscope:vendor=The Android Open Source Project:resolution=0.001:,type=2:name=Goldfish 3-axis Magnetic field sensor:vendor=The Android Open Source Project:resolution=0.5:,type=5:name=Goldfish Light sensor:vendor=The Android Open Source Project:resolution=1.0:,type=6:name=Goldfish Pressure sensor:vendor=The Android Open Source Project:resolution=1.0:,",
+  12: "",
+  13: "1000.0",
+  14: "1080*2154",
+  15: "Ring_Synth_04.ogg",
+  20: "0",
+  21: "0",
+  22: "",
+  23: "google",
+  24: "sdk_gphone64_arm64",
+  25: "13",
+  33: "33",
+  35: "",
+  42: "Google",
+  44: "",
+  45: "",
+  46: "0",
+  51: "",
+  100: "",
+  101: "0",
+  102: "0",
+  103: "0",
+  104: "2",
+  105: "100",
+  106: "",
+  107: "com.sgcc.wsgw.cn_DAB5608ECD1ABEF80E5FA277CF3B8D50",
+  108: "5",
+  113: "0",
+  114: "0",
+  115: "",
+  116: "",
+  117: "1",
+  118: "v4;-1_v6;-1",
+  120: "rwxp;/apex/com.android.art/lib64/libart.so,rwxp;/apex/com.android.runtime/lib64/bionic/libdl.so,rwxp;/system/lib64/libz.so",
+  121: "",
+  122: "",
+  124: "",
+  131: "0,0,Built-in Screen,1080x2220,131,1,0,",
+  133: "android.content.pm.IPackageManager$Stub$Proxy,,",
+  135: "tmpfs:/dev:tmpfs:rw&seclabel&nosuid&relatime&mode=755,tmpfs:/mnt:tmpfs:rw&seclabel&nosuid&nodev&noexec&relatime&mode=755&gid=1000,/dev/fuse:/mnt/installer/0/emulated:fuse:rw&lazytime&nosuid&nodev&noexec&noatime&user_id=0&group_id=0&allow_other,/dev/block/platform/a003c00.virtio_mmio/by-name/metadata:/metadata:ext4:rw&seclabel&nosuid&nodev&noatime,tmpfs:/apex:tmpfs:rw&seclabel&nosuid&nodev&noexec&relatime&mode=755,tmpfs:/apex/apex-info-list.xml:tmpfs:rw&seclabel&nosuid&nodev&noexec&relatime&mode=755,/dev/fuse:/storage/emulated:fuse:rw&lazytime&nosuid&nodev&noexec&noatime&user_id=0&group_id=0&allow_other,tmpfs:/data/data:tmpfs:rw&seclabel&nosuid&nodev&noexec&relatime&mode=751,tmpfs:/data/user:tmpfs:rw&seclabel&nosuid&nodev&noexec&relatime&mode=751,tmpfs:/data/user_de:tmpfs:rw&seclabel&nosuid&nodev&noexec&relatime&mode=751,tmpfs:/data/misc/profiles/cur:tmpfs:rw&seclabel&nosuid&nodev&noexec&relatime&mode=751,tmpfs:/data/misc/profiles/ref:tmpfs:rw&seclabel&nosuid&nodev&noexec&relatime&mode=751,/dev/block/loop::13,/dev/block/dm::71",
+  137: "-8233870966039513836:enforcing,7247450386580705748:0,3920320800439300925:T-Mobile",
+  138: "5,1",
+  140: "0,0,,0,,",
+  149: "en-US",
+  150: "Asia/Shanghai",
+  151: "310260",
+  152: "0",
+  200: "32,2,3,4,36,5,6,40,136,43,45,143,144,10002,19,10003",
+}
