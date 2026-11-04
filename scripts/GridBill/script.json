@@ -2,7 +2,7 @@
   "name": "GridBill",
   "icon": "bolt.circle.fill",
   "color": "rgba(11, 143, 126, 1)",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "State Grid balance and electricity usage widget. Talks directly to the official app API from this device only.",
   "localizedNames": {
     "zh": "国网电费"

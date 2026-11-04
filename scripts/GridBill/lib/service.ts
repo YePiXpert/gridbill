@@ -22,6 +22,8 @@ const RETRY_AFTER_FAILURE = HOUR
 /** 小组件一次运行里花在联网上的总时间。官方文档没写上限，只说扩展进程随时可能被结束。 */
 const WIDGET_NETWORK_BUDGET = 25 * 1000
 
+type Attempt<T> = { ok: true; value: T } | { ok: false }
+
 export type WidgetModel =
   | { state: 'ok'; view: BillView; nextRefresh: Date }
   | { state: 'signedOut'; nextRefresh: Date }
@@ -146,8 +148,9 @@ export function createService(
     const previousSameYear = previous && chinaTime(previous.fetchedAt).year === today.year ? previous : null
 
     // 单个接口报错不影响其他数据：不同地区支持的接口不一样。
+    // 注意：Scripting 按 TSX 解析 .ts 文件，这里不能写成 async <T>(...) => 形式的泛型箭头函数。
     let firstProblem: SgccError | null = null
-    const attempt = async <T>(work: () => Promise<T>, tolerateNetwork = false): Promise<{ ok: true; value: T } | { ok: false }> => {
+    async function attempt<T>(work: () => Promise<T>, tolerateNetwork = false): Promise<Attempt<T>> {
       try {
         return { ok: true, value: await work() }
       } catch (error) {
@@ -163,7 +166,7 @@ export function createService(
     // 这个户号查到过每日数据，这次报错多半是临时的：整次作废、保留缓存、稍后重试，不用空数据覆盖。
     // 从来没查到过的话，可能是地区不支持，不能因此连余额都看不到。
     const dailyQuery = () => client.dailyUsage(session, account, monthStart, monthEnd)
-    const current: Awaited<ReturnType<typeof attempt<Awaited<ReturnType<typeof dailyQuery>>>>> = previous?.daily.length
+    const current: Attempt<{ readings: DailyUsage[]; totalKwh: number | null }> = previous?.daily.length
       ? { ok: true, value: await dailyQuery() }
       : await attempt(dailyQuery)
     const currentDaily = current.ok ? current.value : null
