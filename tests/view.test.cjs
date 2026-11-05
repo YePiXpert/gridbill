@@ -37,6 +37,7 @@ test('没有任何数据时全部显示占位符，不显示 0', () => {
   assert.equal(v.yearKwh, '--')
   assert.equal(v.lastBill, null)
   assert.equal(v.latest, null)
+  assert.equal(v.axis, null)
   assert.deepEqual(v.bars, [])
   assert.equal(v.tier, null)
 })
@@ -80,22 +81,95 @@ test('阶梯：设置错误或没有累计数据时不显示', () => {
   assert.equal(view().tier, null)
 })
 
-test('阶梯：三档的进度、单价和文字', () => {
+test('阶梯：三档的进度和文字', () => {
   const settings = { tier2: 2000, tier3: 4000 }
   const first = view({ yearEstimateKwh: 1000 }, settings).tier
   assert.deepEqual(first.segments, [0.5, 0, 0])
   assert.equal(first.level, 1)
-  assert.equal(first.text, '第一档 0.4883 元/度 · 距第二档 1,000 度')
+  assert.equal(first.label, '第一档')
+  assert.equal(first.hint, '距第二档 1,000 度')
   const second = view({ yearEstimateKwh: 3000 }, settings).tier
   assert.deepEqual(second.segments, [1, 0.5, 0])
   assert.equal(second.level, 2)
-  assert.equal(second.text, '第二档 0.5383 元/度 · 距第三档 1,000 度')
+  assert.equal(second.label, '第二档')
+  assert.equal(second.hint, '距第三档 1,000 度')
   const third = view({ yearEstimateKwh: 5000 }, settings).tier
   assert.deepEqual(third.segments, [1, 1, 0.5])
   assert.equal(third.level, 3)
-  assert.equal(third.text, '第三档 0.7883 元/度 · 已超出 1,000 度')
+  assert.equal(third.label, '第三档')
+  assert.equal(third.hint, '已超出 1,000 度')
   assert.deepEqual(view({ yearEstimateKwh: 2000 }, settings).tier.segments, [1, 0, 0], '正好踩线还算第一档')
   assert.equal(view({ yearEstimateKwh: 2000 }, settings).tier.level, 1)
+})
+
+/** 连续 count 天的读数，最后一天是 last。 */
+const readings = (count, kwh = () => 14, last = '2026-11-03') =>
+  Array.from({ length: count }, (_, i) => ({
+    day: new Date(Date.parse(last) - (count - 1 - i) * 86_400_000).toISOString().slice(0, 10),
+    kwh: kwh(i),
+    yuan: null,
+  }))
+/** 北京时间 11 月 5 日上午，最新读数是 11/3。 */
+const NOV_5 = Date.UTC(2026, 10, 5, 1, 28)
+const forecast = (yearEstimateKwh, patch = {}) => view({ fetchedAt: NOV_5, yearEstimateKwh, daily: readings(14), ...patch }).tier
+
+test('跨档预估：按日均算，并扣掉读数还没出来的那几天', () => {
+  const tier = forecast(4700)
+  assert.equal(tier.label, '第二档')
+  assert.equal(tier.hint, '约 5 天后进第三档', '100 度 ÷ 14 度/天 ≈ 7.1 天，11/3 之后的两天已经过去了')
+  assert.equal(tier.urgent, true)
+  assert.equal(forecast(2800).hint, '约 4 天后进第二档', '第一档到第二档也一样')
+})
+
+test('跨档预估：马上就到时至少说 1 天，不会说 0 天或负数', () => {
+  assert.equal(forecast(4799).hint, '约 1 天后进第三档')
+  assert.equal(forecast(4800).hint, '约 1 天后进第三档', '正好踩线还算第二档')
+})
+
+test('跨档预估：超过 30 天不预估，只显示还差多少度', () => {
+  const tier = forecast(3000)
+  assert.equal(tier.hint, '距第三档 1,800 度')
+  assert.equal(tier.urgent, false)
+  assert.equal(forecast(4800 - 14 * 32).urgent, true, '正好 30 天还预估')
+  assert.equal(forecast(4800 - 14 * 33).urgent, false, '31 天就不预估了')
+})
+
+test('跨档预估：今年到不了的不预估，阶梯 1 月 1 日重新累计', () => {
+  const december = { fetchedAt: Date.UTC(2026, 11, 20, 1), daily: readings(14, () => 14, '2026-12-18') }
+  assert.equal(forecast(4500, december).hint, '距第三档 300 度', '约 19 天后已经是明年')
+  assert.equal(forecast(4700, december).hint, '约 5 天后进第三档', '年内能到的还预估')
+  assert.equal(forecast(4790, { fetchedAt: Date.UTC(2026, 11, 31, 1), daily: readings(14, () => 14, '2026-12-29') }).urgent, false, '最后一天没有“之后”了')
+})
+
+test('跨档预估：读数太少或一直没用电时不预估', () => {
+  assert.equal(forecast(4700, { daily: readings(2) }).hint, '距第三档 100 度')
+  assert.equal(forecast(4700, { daily: [] }).hint, '距第三档 100 度')
+  assert.equal(forecast(4700, { daily: readings(14, () => 0) }).hint, '距第三档 100 度', '不能除以 0')
+  assert.equal(forecast(4700, { daily: readings(3) }).urgent, true, '3 天就够了')
+})
+
+test('跨档预估：已经到第三档就没有下一档了', () => {
+  const tier = forecast(5000)
+  assert.equal(tier.hint, '已超出 200 度')
+  assert.equal(tier.urgent, false)
+})
+
+test('图表说明：从第一根柱子的日期开始，日均按显示的这几天算', () => {
+  const daily = [...readings(6, () => 100, '2026-10-20'), ...readings(14, i => (i % 2 ? 10 : 20))]
+  assert.deepEqual(view({ daily }).axis, { start: '10/21', average: '15' }, '更早的 6 天不算进日均')
+  assert.deepEqual(view({ daily: readings(7) }, { chartDays: 7 }).axis, { start: '10/28', average: '14' })
+  assert.equal(view({ daily: readings(14, i => 10 + i / 7) }).axis.average, '10.9', '保留一位小数')
+})
+
+test('图表说明：读数不够时，起始日期算到最左一格', () => {
+  assert.equal(view({ daily: readings(4) }).axis.start, '10/21', '11/3 往前数 14 格，其中 10 格是空的')
+  assert.equal(view({ daily: readings(4, () => 14, '2026-01-03') }).axis.start, '12/21', '跨年也对')
+})
+
+test('图表说明：读数少于 3 天没有日均，没有读数就没有说明', () => {
+  assert.equal(view({ daily: readings(2) }).axis.average, null)
+  assert.equal(view({ daily: readings(3) }).axis.average, '14')
+  assert.equal(view({ daily: [{ day: '2026-11-01', kwh: null, yuan: null }] }).axis, null, '占位行不算读数')
 })
 
 test('本月电费：按本月这段用电落在哪几档分别计价', () => {

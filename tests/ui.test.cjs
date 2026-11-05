@@ -43,7 +43,7 @@ for (const [family, size] of [['systemMedium', { width: 338, height: 158 }], ['s
         assert.equal(bar.props.frame.maxWidth, 'infinity', '不写死宽度')
         assert.equal(bar.props.frame.width, undefined)
         assert.equal(bar.props.frame.minHeight, bar.props.frame.maxHeight, '高度固定')
-        assert.ok(bar.props.frame.maxHeight >= 2 && bar.props.frame.maxHeight <= 44)
+        assert.ok(bar.props.frame.maxHeight >= 2 && bar.props.frame.maxHeight <= 52)
       }
     }
   })
@@ -107,7 +107,80 @@ test('余额缺失时不显示“元”', () => {
   const view = buildBillView(snapshot, ACCOUNT, DEFAULT_SETTINGS, null)
   const all = texts(render({ state: 'ok', view, nextRefresh: next }))
   assert.ok(all.includes('--'))
-  assert.equal(all.filter(text => text === '元').length, 1, '只有上期账单带“元”')
+  assert.ok(!all.includes('元'))
+  assert.match(all.join(' '), /账单 [\d.]+ 元/, '上期账单不受影响')
+})
+
+const SNAPSHOT_NOW = (patch = {}) => ({ ...demoSnapshot(NOW), ...patch })
+const mediumTree = (patch = {}, settings = {}) => render({ state: 'ok', view: buildBillView(SNAPSHOT_NOW(patch), ACCOUNT, { ...DEFAULT_SETTINGS, ...settings }, null), nextRefresh: next })
+const textNode = (tree, pattern) => findAll(tree, 'Text').find(node => pattern.test(texts(node).join(' ')))
+
+test('中号：图表下面有起始日期、日均和最新一天的读数', () => {
+  const all = texts(mediumTree()).join(' ')
+  assert.match(all, /10\/21/, '演示数据最新是 11/3，往前数 14 格')
+  assert.match(all, /日均 [\d.]+ 度/)
+  assert.match(all, /11\/3 [\d.]+ 度/)
+})
+
+test('中号：本月用电在图表上面，今年累计和档位在最下面', () => {
+  const all = texts(mediumTree()).join(' ')
+  assert.match(all, /本月 137 度/)
+  assert.match(all, /今年 2,315 度 · 第一档/)
+  assert.ok(all.indexOf('本月 137 度') < all.indexOf('今年 2,315 度'))
+})
+
+test('中号：快到下一档时提示醒目，还远时只是普通文字', () => {
+  const near = textNode(mediumTree({ yearEstimateKwh: 4700 }), /天后进第三档/)
+  assert.equal(near.props.fontWeight, 'semibold')
+  assert.equal(typeof near.props.foregroundStyle, 'object', '用区分深浅色的橙色')
+  const far = textNode(mediumTree({ yearEstimateKwh: 3000 }), /距第三档/)
+  assert.equal(far.props.fontWeight, 'regular')
+  assert.equal(far.props.foregroundStyle, 'secondaryLabel')
+})
+
+test('中号：左边一栏靠左对齐，不会被 frame 默认居中', () => {
+  const column = findAll(mediumTree(), 'VStack').find(node => node.props.frame?.width !== undefined)
+  assert.equal(column.props.frame.alignment, 'leading')
+})
+
+test('中号：柱子高度随机型伸缩，其他元素高度固定', () => {
+  for (const [size, expected] of [[{ width: 292, height: 141 }, 31], [{ width: 338, height: 158 }, 48], [{ width: 360, height: 169 }, 52], [{ width: 280, height: 130 }, 28]]) {
+    const tree = render({ state: 'ok', view: demoView(), nextRefresh: next }, 'systemMedium', size)
+    const tallest = Math.max(...findAll(tree, 'RoundedRectangle').map(bar => bar.props.frame.maxHeight))
+    assert.equal(Math.round(tallest), expected, `${size.width}×${size.height}`)
+  }
+})
+
+test('中号：档位设置不对时不画阶梯条，但今年累计还在', () => {
+  const tree = mediumTree({}, { tier2: 0, tier3: 0 })
+  assert.equal(findAll(tree, 'ProgressView').length, 0)
+  assert.match(texts(tree).join(' '), /今年 2,315 度/)
+  assert.doesNotMatch(texts(tree).join(' '), /第一档/)
+})
+
+test('中号：缺数据时显示 --，不带单位，也不留空白', () => {
+  const all = texts(mediumTree({ monthKwh: null, yearEstimateKwh: null, yearKwh: null, lastBill: null, balance: null, daily: [] })).join(' ')
+  assert.match(all, /本月 --/)
+  assert.match(all, /今年 --/)
+  assert.match(all, /上期账单 --/)
+  assert.match(all, /暂无每日数据/)
+  assert.match(all, /每日数据通常延迟一两天/)
+  assert.doesNotMatch(all, /-- (度|元)/)
+  assert.doesNotMatch(all, /日均/)
+})
+
+test('中号：上期账单的金额缺失时不带“元”', () => {
+  const all = texts(mediumTree({ lastBill: { month: '2026-10', kwh: 100, yuan: null, endDay: null } })).join(' ')
+  assert.match(all, /10月账单 --/)
+  assert.doesNotMatch(all, /-- 元/)
+})
+
+test('中号：读数只有两天时不显示日均，也不预估', () => {
+  const daily = [{ day: '2026-11-02', kwh: 14, yuan: null }, { day: '2026-11-03', kwh: 13, yuan: null }]
+  const all = texts(mediumTree({ daily, yearEstimateKwh: 4700 })).join(' ')
+  assert.doesNotMatch(all, /日均/)
+  assert.doesNotMatch(all, /天后进/)
+  assert.match(all, /距第三档 100 度/)
 })
 
 test('没有每日数据时显示提示而不是空白', () => {

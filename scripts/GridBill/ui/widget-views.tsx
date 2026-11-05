@@ -11,10 +11,15 @@ const ACCENT = { light: '#0B8F7E', dark: '#3AD6BF' }
 const ACCENT_SOFT = { light: 'rgba(11,143,126,0.32)', dark: 'rgba(58,214,191,0.34)' }
 const TRACK = { light: 'rgba(60,60,67,0.12)', dark: 'rgba(235,235,245,0.16)' }
 const TIER_COLORS = ['systemGreen', 'systemOrange', 'systemRed']
+/** 小字用的橙色：systemOrange 在白底上对比度不够。 */
+const URGENT_TEXT = { light: '#A85A00', dark: '#FFB340' }
 const SECONDARY = 'secondaryLabel'
 const TERTIARY = 'tertiaryLabel'
 
 const toneColor = (tone: Tone) => (tone === 'danger' ? 'systemRed' : tone === 'warning' ? 'systemOrange' : 'label')
+
+/** 137 → 137 度；缺失时只显示 --，不带单位。 */
+const kwhText = (value: string) => (value === PLACEHOLDER ? PLACEHOLDER : `${value} 度`)
 
 function Title({ text }: { text: string }) {
   return (
@@ -53,35 +58,15 @@ function Amount({ view, size }: { view: BillView; size: number }) {
   )
 }
 
-function Footer({ view, noticeLines }: { view: BillView; noticeLines: number }) {
+function Footer({ view }: { view: BillView }) {
   return view.notice ? (
-    <Text font={10} foregroundStyle="systemOrange" lineLimit={noticeLines} minScaleFactor={0.8}>
+    <Text font={10} foregroundStyle="systemOrange" lineLimit={1} minScaleFactor={0.8}>
       {view.notice}
     </Text>
   ) : (
-    <Text font={10} foregroundStyle={TERTIARY} lineLimit={1}>
+    <Text font={10} foregroundStyle={SECONDARY} lineLimit={1}>
       {`更新 ${view.updated}`}
     </Text>
-  )
-}
-
-function Stat({ label, value, unit }: { label: string; value: string; unit: string }) {
-  return (
-    <VStack alignment="leading" spacing={1}>
-      <Text font={10} foregroundStyle={SECONDARY} lineLimit={1}>
-        {label}
-      </Text>
-      <HStack alignment="firstTextBaseline" spacing={1}>
-        <Text font={14} fontWeight="semibold" fontDesign="rounded" lineLimit={1} minScaleFactor={0.7}>
-          {value}
-        </Text>
-        {value === PLACEHOLDER ? null : (
-          <Text font={9} foregroundStyle={SECONDARY}>
-            {unit}
-          </Text>
-        )}
-      </HStack>
-    </VStack>
   )
 }
 
@@ -120,9 +105,54 @@ function Bars({ view, height }: { view: BillView; height: number }) {
   )
 }
 
-function latestLine({ latest, monthCost }: BillView): string {
-  if (!latest) return '每日数据通常延迟一两天'
-  return monthCost ? `最新 ${latest.label} ${latest.kwh} 度 · 本月约 ${monthCost} 元` : `最新 ${latest.label} 用电 ${latest.kwh} 度`
+/** 图表上方：本月用了多少、大概多少钱。 */
+function MonthLine({ view }: { view: BillView }) {
+  return (
+    <HStack spacing={4} padding={{ bottom: 4 }}>
+      <Text font={11} fontWeight="semibold" lineLimit={1} minScaleFactor={0.8}>
+        {`本月 ${kwhText(view.monthKwh)}`}
+      </Text>
+      {view.monthCost ? (
+        <Text font={11} foregroundStyle={SECONDARY} lineLimit={1} minScaleFactor={0.8}>
+          {`· 约 ${view.monthCost} 元`}
+        </Text>
+      ) : null}
+    </HStack>
+  )
+}
+
+/** 图表下方：起始日期、日均、最新一天的读数。柱子本身没有刻度，靠这一行才看得出跨度和高低。 */
+function ChartAxis({ view }: { view: BillView }) {
+  const { axis, latest } = view
+  if (!axis || !latest) {
+    return (
+      <Text font={10} foregroundStyle={SECONDARY} lineLimit={1} minScaleFactor={0.8} padding={{ top: 2 }}>
+        每日数据通常延迟一两天
+      </Text>
+    )
+  }
+  return (
+    <HStack spacing={4} padding={{ top: 2 }} frame={{ maxWidth: 'infinity' }}>
+      <Text font={10} foregroundStyle={SECONDARY} lineLimit={1}>
+        {axis.start}
+      </Text>
+      <Spacer />
+      {axis.average ? (
+        <Text font={10} foregroundStyle={SECONDARY} lineLimit={1} minScaleFactor={0.8}>
+          {`日均 ${axis.average} 度`}
+        </Text>
+      ) : null}
+      <Spacer />
+      <Text font={10} foregroundStyle={SECONDARY} lineLimit={1} minScaleFactor={0.8}>
+        {`${latest.label} ${latest.kwh} 度`}
+      </Text>
+    </HStack>
+  )
+}
+
+function lastBillLine({ lastBill }: BillView): string {
+  if (!lastBill) return `上期账单 ${PLACEHOLDER}`
+  return lastBill.yuan === PLACEHOLDER ? `${lastBill.label} ${PLACEHOLDER}` : `${lastBill.label} ${lastBill.yuan} 元`
 }
 
 /** 三段等宽，每段表示这一档用了多少。 */
@@ -145,7 +175,7 @@ function SmallView({ view }: { view: BillView }) {
       <Amount view={view} size={26} />
       <Spacer />
       <Text font={11} foregroundStyle={SECONDARY} lineLimit={1} minScaleFactor={0.8} padding={{ bottom: 3 }}>
-        {view.monthCost ? `本月 ${view.monthKwh} 度 · 约 ${view.monthCost} 元` : `本月 ${view.monthKwh} 度`}
+        {view.monthCost ? `本月 ${kwhText(view.monthKwh)} · 约 ${view.monthCost} 元` : `本月 ${kwhText(view.monthKwh)}`}
       </Text>
       <Bars view={view} height={view.tier ? 16 : 22} />
       {view.tier ? (
@@ -154,46 +184,68 @@ function SmallView({ view }: { view: BillView }) {
         </VStack>
       ) : null}
       <VStack padding={{ top: 5 }}>
-        <Footer view={view} noticeLines={1} />
+        <Footer view={view} />
       </VStack>
     </VStack>
   )
 }
 
-function MediumView({ view }: { view: BillView }) {
-  const leftWidth = Math.round((Widget.displaySize.width - 32) * 0.36)
+/** 最下面一行：今年累计、当前档位、离下一档还有多远。档位设置不对时只显示累计。 */
+function TierRow({ view }: { view: BillView }) {
+  const year = `今年 ${kwhText(view.yearKwh)}`
+  if (!view.tier) {
+    return (
+      <Text font={10} foregroundStyle={SECONDARY} lineLimit={1} minScaleFactor={0.8}>
+        {year}
+      </Text>
+    )
+  }
   return (
-    <HStack alignment="top" spacing={14} padding={{ horizontal: 16, vertical: 14 }} frame={{ maxWidth: 'infinity', maxHeight: 'infinity', alignment: 'topLeading' }} widgetBackground={BACKGROUND}>
-      <VStack alignment="leading" spacing={0} frame={{ width: leftWidth }}>
+    <VStack alignment="leading" spacing={3} frame={{ maxWidth: 'infinity' }}>
+      <TierBar view={view} />
+      <HStack spacing={4} frame={{ maxWidth: 'infinity' }}>
+        <Text font={10} foregroundStyle={SECONDARY} lineLimit={1} minScaleFactor={0.8}>
+          {`${year} · ${view.tier.label}`}
+        </Text>
+        <Spacer />
+        <Text font={10} fontWeight={view.tier.urgent ? 'semibold' : 'regular'} foregroundStyle={view.tier.urgent ? URGENT_TEXT : SECONDARY} lineLimit={1} minScaleFactor={0.8}>
+          {view.tier.hint}
+        </Text>
+      </HStack>
+    </VStack>
+  )
+}
+
+function MediumView({ view }: { view: BillView }) {
+  const { width, height } = Widget.displaySize
+  // 这一栏的 frame 要写 alignment：frame 默认居中，内容比这一栏窄时会往右缩进。
+  const leftWidth = Math.round((width - 32) * 0.38)
+  // 不同机型的中号高度从 141 到 170 不等，其他元素高度固定，由柱子来伸缩。
+  const chartHeight = Math.max(28, Math.min(52, height - 110))
+  return (
+    <VStack alignment="leading" spacing={0} padding={{ horizontal: 16, vertical: 13 }} frame={{ maxWidth: 'infinity', maxHeight: 'infinity', alignment: 'topLeading' }} widgetBackground={BACKGROUND}>
+      <HStack spacing={6} frame={{ maxWidth: 'infinity' }}>
         <Title text={view.title} />
         <Spacer />
-        <Amount view={view} size={28} />
-        <Spacer />
-        <Footer view={view} noticeLines={2} />
-      </VStack>
-      <VStack alignment="leading" spacing={0} frame={{ maxWidth: 'infinity' }}>
-        <HStack alignment="top" spacing={4} frame={{ maxWidth: 'infinity' }}>
-          <Stat label="本月" value={view.monthKwh} unit="度" />
-          <Spacer />
-          <Stat label={view.lastBill?.label ?? '上期账单'} value={view.lastBill?.yuan ?? PLACEHOLDER} unit="元" />
-          <Spacer />
-          <Stat label="今年" value={view.yearKwh} unit="度" />
-        </HStack>
-        <Spacer />
-        <Bars view={view} height={view.tier ? 28 : 44} />
-        <Text font={10} foregroundStyle={SECONDARY} lineLimit={1} minScaleFactor={0.8} padding={{ top: 3 }}>
-          {latestLine(view)}
-        </Text>
-        {view.tier ? (
-          <VStack alignment="leading" spacing={2} padding={{ top: 5 }} frame={{ maxWidth: 'infinity' }}>
-            <TierBar view={view} />
-            <Text font={10} foregroundStyle={SECONDARY} lineLimit={1} minScaleFactor={0.8}>
-              {view.tier.text}
-            </Text>
-          </VStack>
-        ) : null}
-      </VStack>
-    </HStack>
+        <Footer view={view} />
+      </HStack>
+      <Spacer />
+      <HStack spacing={14} frame={{ maxWidth: 'infinity' }}>
+        <VStack alignment="leading" spacing={3} frame={{ width: leftWidth, alignment: 'leading' }}>
+          <Amount view={view} size={28} />
+          <Text font={10} foregroundStyle={SECONDARY} lineLimit={1} minScaleFactor={0.8}>
+            {lastBillLine(view)}
+          </Text>
+        </VStack>
+        <VStack alignment="leading" spacing={0} frame={{ maxWidth: 'infinity', alignment: 'leading' }}>
+          <MonthLine view={view} />
+          <Bars view={view} height={chartHeight} />
+          <ChartAxis view={view} />
+        </VStack>
+      </HStack>
+      <Spacer />
+      <TierRow view={view} />
+    </VStack>
   )
 }
 

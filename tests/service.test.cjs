@@ -342,7 +342,8 @@ test('默认设置：按北京标准算出档位和本月电费', async () => {
   const { service } = await signedIn()
   const { view } = await service.loadWidgetModel('')
   assert.equal(view.tier.level, 1)
-  assert.equal(view.tier.text, '第一档 0.4883 元/度 · 距第二档 830 度')
+  assert.equal(view.tier.label, '第一档')
+  assert.equal(view.tier.hint, '距第二档 830 度')
   assert.equal(view.monthCost, '14.89', '30.5 度 × 0.4883')
 })
 

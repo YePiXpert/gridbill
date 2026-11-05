@@ -17,13 +17,25 @@ export type BillView = {
   bars: Array<{ day: string; ratio: number }>
   /** 图表固定的格数。读数不够时前面留空，柱子不会被撑粗 */
   chartSlots: number
+  /** 图表下方的说明：最左一格的日期和日均。没有读数时是 null，读数太少时没有日均 */
+  axis: { start: string; average: string | null } | null
   latest: { label: string; kwh: string } | null
-  tier: { segments: [number, number, number]; level: 1 | 2 | 3; text: string } | null
+  /** hint 是到下一档的提示；urgent 表示快到了，要醒目一点 */
+  tier: { segments: [number, number, number]; level: 1 | 2 | 3; label: string; hint: string; urgent: boolean } | null
   updated: string
   notice: string | null
 }
 
 export const PLACEHOLDER = '--'
+
+const DAY_MS = 86_400_000
+/** 读数太少时平均值没有参考价值。 */
+const MIN_DAYS_FOR_AVERAGE = 3
+/** 用电量随季节变化，更远的预估不可靠，不如直接显示还差多少度。 */
+const FORECAST_WITHIN_DAYS = 30
+
+const daysBetween = (from: string, to: string) => Math.round((Date.parse(to) - Date.parse(from)) / DAY_MS)
+const addDays = (isoDay: string, days: number) => new Date(Date.parse(isoDay) + days * DAY_MS).toISOString().slice(0, 10)
 
 export function formatYuan(value: number | null): string {
   return value === null ? PLACEHOLDER : value.toFixed(2)
@@ -47,16 +59,35 @@ function headline(balance: Balance | null): BillView['headline'] {
 
 const clamp01 = (value: number) => Math.max(0, Math.min(1, value))
 
-function tier(used: number | null, { tier2, tier3, price1, price2, price3 }: Settings): BillView['tier'] {
+type Pace = { kwhPerDay: number; latestDay: string; today: string }
+
+/**
+ * 按近期日均估算还有几天到下一档。
+ * 读数有延迟：最新读数之后到今天这几天已经在用电了，要扣掉。
+ * 阶梯每年 1 月 1 日重新累计，今年到不了的就不预估。
+ */
+function daysToNextTier(remaining: number, pace: Pace | null): number | null {
+  if (!pace || pace.kwhPerDay <= 0) return null
+  const days = Math.max(1, Math.round(remaining / pace.kwhPerDay - daysBetween(pace.latestDay, pace.today)))
+  const leftThisYear = daysBetween(pace.today, `${pace.today.slice(0, 4)}-12-31`)
+  return days <= Math.min(FORECAST_WITHIN_DAYS, leftThisYear) ? days : null
+}
+
+function nextTierHint(remaining: number, nextLabel: string, pace: Pace | null): { hint: string; urgent: boolean } {
+  const days = daysToNextTier(remaining, pace)
+  return days === null ? { hint: `距${nextLabel} ${formatKwh(remaining)} 度`, urgent: false } : { hint: `约 ${days} 天后进${nextLabel}`, urgent: true }
+}
+
+function tier(used: number | null, { tier2, tier3 }: Settings, pace: Pace | null): BillView['tier'] {
   if (used === null || tier2 <= 0 || tier3 <= tier2) return null
   const segments: [number, number, number] = [
     clamp01(used / tier2),
     clamp01((used - tier2) / (tier3 - tier2)),
     clamp01((used - tier3) / (tier3 - tier2)),
   ]
-  if (used <= tier2) return { segments, level: 1, text: `第一档 ${price1} 元/度 · 距第二档 ${formatKwh(tier2 - used)} 度` }
-  if (used <= tier3) return { segments, level: 2, text: `第二档 ${price2} 元/度 · 距第三档 ${formatKwh(tier3 - used)} 度` }
-  return { segments, level: 3, text: `第三档 ${price3} 元/度 · 已超出 ${formatKwh(used - tier3)} 度` }
+  if (used <= tier2) return { segments, level: 1, label: '第一档', ...nextTierHint(tier2 - used, '第二档', pace) }
+  if (used <= tier3) return { segments, level: 2, label: '第二档', ...nextTierHint(tier3 - used, '第三档', pace) }
+  return { segments, level: 3, label: '第三档', hint: `已超出 ${formatKwh(used - tier3)} 度`, urgent: false }
 }
 
 /** 本月用电是今年累计的最后一段，看这一段落在哪几档，分别计价。 */
@@ -81,7 +112,9 @@ export function buildBillView(snapshot: Snapshot, account: Account, settings: Se
   const max = Math.max(0, ...recent.map(day => day.kwh))
   const last = recent[recent.length - 1]
   const updated = chinaTime(snapshot.fetchedAt)
-  const tierView = tier(snapshot.yearEstimateKwh, settings)
+  const average = recent.length >= MIN_DAYS_FOR_AVERAGE ? recent.reduce((total, day) => total + day.kwh, 0) / recent.length : null
+  const pace = average === null ? null : { kwhPerDay: average, latestDay: last.day, today: updated.isoDay }
+  const tierView = tier(snapshot.yearEstimateKwh, settings, pace)
   return {
     title: settings.names[account.id] || accountDisplayName(account),
     headline: headline(snapshot.balance),
@@ -94,6 +127,8 @@ export function buildBillView(snapshot: Snapshot, account: Account, settings: Se
     yearKwh: formatKwh(snapshot.yearEstimateKwh ?? snapshot.yearKwh),
     bars: recent.map(day => ({ day: day.day, ratio: max > 0 ? day.kwh / max : 0 })),
     chartSlots: settings.chartDays,
+    // 读数不够时前面是空格子，起始日期要算到最左一格，否则会让人以为图表只覆盖这几天。
+    axis: last ? { start: shortDay(addDays(recent[0].day, recent.length - settings.chartDays)), average: average === null ? null : formatKwh(average) } : null,
     latest: last ? { label: shortDay(last.day), kwh: formatKwh(last.kwh) } : null,
     tier: tierView,
     updated: `${updated.month}/${updated.day} ${updated.hour}:${updated.minute}`,
@@ -103,13 +138,13 @@ export function buildBillView(snapshot: Snapshot, account: Account, settings: Se
 
 /** 演示数据：不联网，用来看布局。 */
 export function demoSnapshot(now: number): Snapshot {
-  const day = (offset: number) => chinaTime(now - offset * 86_400_000).isoDay
+  const day = (offset: number) => chinaTime(now - offset * DAY_MS).isoDay
   const daily = Array.from({ length: 21 }, (_, i) => ({
     day: day(21 - i),
     kwh: Math.round((9 + 5 * Math.sin(i * 0.9) + (i % 7 === 5 ? 4 : 0)) * 10) / 10,
     yuan: null,
   }))
-  const lastMonth = chinaTime(now - 35 * 86_400_000)
+  const lastMonth = chinaTime(now - 35 * DAY_MS)
   return {
     accountId: 'demo',
     fetchedAt: now,
