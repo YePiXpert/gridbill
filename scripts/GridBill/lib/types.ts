@@ -57,7 +57,7 @@ export type Snapshot = {
   yearYuan: number | null
   /** 今年累计电量估算：已结算 + 结算之后的每日用电，用于阶梯 */
   yearEstimateKwh: number | null
-  /** 最近 31 天，时间升序 */
+  /** 最近 31 个有读数的日子，时间升序 */
   daily: DailyUsage[]
 }
 

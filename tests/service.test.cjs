@@ -335,8 +335,7 @@ test('小组件：一次刷新的请求数有上限，并且数据正确', async
   assert.equal(snapshot.yearKwh, 2000)
   // 结算到 9/30，之后的每日：10/30 12 + 10/31 8 + 11/1 20 + 11/2 10.5
   assert.equal(snapshot.yearEstimateKwh, 2050.5)
-  assert.deepEqual(snapshot.daily.map(d => d.day), ['2026-10-30', '2026-10-31', '2026-11-01', '2026-11-02', '2026-11-03'])
-  assert.equal(snapshot.daily[4].kwh, null, '占位符保持 null')
+  assert.deepEqual(snapshot.daily.map(d => d.day), ['2026-10-30', '2026-10-31', '2026-11-01', '2026-11-02'], '占位行不保存，也不会变成 0')
 })
 
 test('默认设置：按北京标准算出档位和本月电费', async () => {
@@ -359,7 +358,7 @@ test('旧版本存下的设置：没填的阶梯和单价用北京默认，填�
 /** 已结算到上月底，不需要为了阶梯估算去查上个月。 */
 const settledThroughOctober = () => ok({ yearPq: '100', list: [{ month: '202610', monthPq: '100', eleList: [{ endDate: '20261031' }] }] })
 
-/** 本月 3 天，上个整月只给 1 天，滚动窗口给满。真机上出现过读数特别少的情况，这是其中一种可能。 */
+/** 本月 3 天，上个整月只给 1 天，滚动窗口给满。用来验证滚动窗口这条兜底路径。 */
 function sparseMonthDaily(payload) {
   const { startTime, endTime } = payload.data
   const day = n => ({ day: `202611${String(n).padStart(2, '0')}`, dayElePq: '10' })
@@ -371,6 +370,56 @@ function sparseMonthDaily(payload) {
 }
 
 const dailyRanges = server => server.requests.filter(r => r.route === 'daily').map(r => `${r.payload.data.startTime}~${r.payload.data.endTime}`)
+
+/** 真实接口的样子：查询范围内每天都有一行，还没出数据的日子是 "-"。上游 issue #3 记录过查当月返回 30 条。 */
+const everyDayInRange = latest => payload => {
+  const rows = []
+  for (let t = Date.parse(payload.data.startTime); t <= Date.parse(payload.data.endTime); t += 24 * HOUR) {
+    const day = new Date(t).toISOString().slice(0, 10)
+    rows.push({ day: day.replaceAll('-', ''), dayElePq: day <= latest ? '12.5' : '-' })
+  }
+  return ok({ totalPq: '37.5', sevenEleList: rows })
+}
+
+test('当月后面没出数据的日子也有一行时，不能把上个月的读数挤掉（真机上柱状图只有 4 天的原因）', async () => {
+  const { service, server, clock } = await signedIn({ daily: everyDayInRange('2026-11-03'), monthly: settledThroughOctober })
+  const model = await service.loadWidgetModel('')
+  assert.equal(model.view.bars.length, 14, '14 格都有读数')
+  assert.equal(model.view.bars[0].day, '2026-10-21')
+  assert.equal(model.view.latest.label, '11/3')
+  const saved = vault.snapshot('acct-1').daily
+  assert.equal(saved.length, 31, '存满 31 天真实读数')
+  assert.ok(saved.every(row => row.kwh !== null), '占位行不占存储名额')
+  assert.equal(saved[saved.length - 1].day, '2026-11-03')
+
+  server.requests.length = 0
+  server.handlers.daily = everyDayInRange('2026-11-04')
+  clock.t += 13 * HOUR
+  const next = await service.loadWidgetModel('')
+  assert.deepEqual(dailyRanges(server), ['2026-11-01~2026-11-30'], '读数够了就只查本月，不再多发请求')
+  assert.equal(next.view.bars.length, 14)
+  assert.equal(next.view.latest.label, '11/4')
+})
+
+test('更新前存下的快照只剩 4 天读数和一堆占位行：下一次刷新就补满', async () => {
+  const { service } = await signedIn({ daily: everyDayInRange('2026-11-03'), monthly: settledThroughOctober })
+  const reading = (day, kwh) => ({ day, kwh, yuan: null })
+  const placeholders = Array.from({ length: 27 }, (_, i) => reading(`2026-11-${String(i + 4).padStart(2, '0')}`, null))
+  vault.saveSnapshot({
+    accountId: 'acct-1',
+    fetchedAt: START - 13 * HOUR,
+    balance: null,
+    monthKwh: 40,
+    lastBill: null,
+    yearKwh: null,
+    yearYuan: null,
+    yearEstimateKwh: null,
+    daily: [reading('2026-10-31', 14), reading('2026-11-01', 14), reading('2026-11-02', 14), reading('2026-11-03', 14), ...placeholders],
+  })
+  const model = await service.loadWidgetModel('')
+  assert.equal(model.view.bars.length, 14)
+  assert.equal(vault.snapshot('acct-1').daily.length, 31)
+})
 
 test('整月查询读数很少时，靠滚动窗口把柱状图补满', async () => {
   const { service, server } = await signedIn({ daily: sparseMonthDaily, monthly: settledThroughOctober })

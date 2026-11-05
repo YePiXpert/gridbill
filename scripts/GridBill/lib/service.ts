@@ -212,8 +212,7 @@ export function createService(
       if (lastMonth.ok) merge(lastMonth.value.readings)
     }
 
-    // 还不够就再试一次滚动窗口。真机上出现过查完整月仍只有几天读数的情况，原因还没查明，“诊断每日数据”就是查这个的。
-    // 这一步只是补充，连网络错误也不能让整次更新作废。
+    // 还不够就再试一次滚动窗口。这一步只是补充，连网络错误也不能让整次更新作废。
     if (usableDays() < settings.chartDays) {
       const rolling = await attempt(() => client.dailyUsage(session, account, chinaTime(t - ROLLING_WINDOW_DAYS * DAY).isoDay, today.isoDay), true)
       if (rolling.ok) merge(rolling.value.readings)
@@ -249,7 +248,8 @@ export function createService(
       yearKwh: billing ? billing.kwh : previousSameYear?.yearKwh ?? null,
       yearYuan: billing ? billing.yuan : previousSameYear?.yearYuan ?? null,
       yearEstimateKwh,
-      daily: daily.slice(-31),
+      // 接口把当月后面没出数据的日子也返回成占位行。先去掉再截取，否则它们会把上个月的读数挤掉。
+      daily: daily.filter(day => day.kwh !== null).slice(-31),
     }
   }
 
