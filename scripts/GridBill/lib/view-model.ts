@@ -39,14 +39,22 @@ export type DetailView = {
   monthRows: Array<{ label: string; value: string }>
   /** 今年已出账的电量和电费 */
   yearSettled: string | null
+  /** 预计和对比，算不出来的项不出现，都算不出来时是空数组 */
+  outlook: Array<{ label: string; value: string }>
+  /** 全年预计落在哪一档、因此多花多少 */
+  outlookNote: string | null
 }
 
 export const PLACEHOLDER = '--'
 
 const DAY_MS = 86_400_000
 const DETAIL_DAYS = 30
+/** 详情页的账单只显示这么多个月，多存的是给同比和全年预计用的。 */
+const DETAIL_BILL_MONTHS = 12
 /** 读数太少时平均值没有参考价值。 */
 const MIN_DAYS_FOR_AVERAGE = 3
+/** 上个月还没出账时，用它的每日读数当对比基准，太少了就不比。 */
+const MIN_DAYS_TO_COMPARE = 7
 /** 用电量随季节变化，更远的预估不可靠，不如直接显示还差多少度。 */
 const FORECAST_WITHIN_DAYS = 30
 
@@ -75,6 +83,8 @@ function headline(balance: Balance | null): BillView['headline'] {
 
 const clamp01 = (value: number) => Math.max(0, Math.min(1, value))
 
+const hasValidTiers = ({ tier2, tier3 }: Settings) => tier2 > 0 && tier3 > tier2
+
 type Pace = { kwhPerDay: number; latestDay: string; today: string }
 
 /**
@@ -94,8 +104,9 @@ function nextTierHint(remaining: number, nextLabel: string, pace: Pace | null): 
   return days === null ? { hint: `距${nextLabel} ${formatKwh(remaining)} 度`, urgent: false } : { hint: `约 ${days} 天后进${nextLabel}`, urgent: true }
 }
 
-function tier(used: number | null, { tier2, tier3 }: Settings, pace: Pace | null): BillView['tier'] {
-  if (used === null || tier2 <= 0 || tier3 <= tier2) return null
+function tier(used: number | null, settings: Settings, pace: Pace | null): BillView['tier'] {
+  if (used === null || !hasValidTiers(settings)) return null
+  const { tier2, tier3 } = settings
   const segments: [number, number, number] = [
     clamp01(used / tier2),
     clamp01((used - tier2) / (tier3 - tier2)),
@@ -106,13 +117,17 @@ function tier(used: number | null, { tier2, tier3 }: Settings, pace: Pace | null
   return { segments, level: 3, label: '第三档', hint: `已超出 ${formatKwh(used - tier3)} 度`, urgent: false }
 }
 
-/** 本月用电是今年累计的最后一段，看这一段落在哪几档，分别计价。 */
-function monthCost(monthKwh: number | null, yearKwh: number, { tier2, tier3, price1, price2, price3 }: Settings): string | null {
+/** 今年累计从 from 走到 to 这一段电费：落在哪几档，就按哪几档分别计价。 */
+function segmentCost(from: number, to: number, { tier2, tier3, price1, price2, price3 }: Settings): number {
+  const within = (low: number, high: number) => Math.max(0, Math.min(to, high) - Math.max(from, low))
+  return within(0, tier2) * price1 + within(tier2, tier3) * price2 + within(tier3, Infinity) * price3
+}
+
+/** 本月用电是今年累计的最后一段。 */
+function monthCost(monthKwh: number | null, yearKwh: number, settings: Settings): string | null {
   if (monthKwh === null) return null
   const to = Math.max(yearKwh, monthKwh)
-  const from = to - monthKwh
-  const within = (low: number, high: number) => Math.max(0, Math.min(to, high) - Math.max(from, low))
-  return formatYuan(within(0, tier2) * price1 + within(tier2, tier3) * price2 + within(tier3, Infinity) * price3)
+  return formatYuan(segmentCost(to - monthKwh, to, settings))
 }
 
 const shortDay = (isoDay: string) => `${Number(isoDay.slice(5, 7))}/${Number(isoDay.slice(8, 10))}`
@@ -162,14 +177,104 @@ function monthRowValue({ kwh, yuan }: MonthlyBill): string {
   return `${kwh === null ? PLACEHOLDER : `${formatKwh(kwh)} 度`} · ${yuan === null ? PLACEHOLDER : `${formatYuan(yuan)} 元`}`
 }
 
+const pad2 = (value: number) => String(value).padStart(2, '0')
+const daysInMonth = (year: number, month: number) => new Date(Date.UTC(year, month, 0)).getUTCDate()
+
+/** 估算的数字不要显示得太精确：5504 → 5,500，419 → 420，85.3 → 85。 */
+function rough(value: number): string {
+  const step = value >= 1000 ? 100 : value >= 100 ? 10 : 1
+  return (Math.round(value / step) * step).toLocaleString('en-US')
+}
+
+function changeText(value: number, baseline: number, against: string, more: string, less: string): string {
+  const percent = Math.round(((value - baseline) / baseline) * 100)
+  return percent === 0 ? `和${against}差不多` : `比${against}${percent > 0 ? more : less} ${Math.abs(percent)}%`
+}
+
+function yearTierNote(total: number, { tier2, tier3, price1, price2, price3 }: Settings): string {
+  if (total > tier3) return `约 ${rough(total - tier3)} 度落在第三档，比按第二档多花约 ${rough((total - tier3) * (price3 - price2))} 元`
+  if (total > tier2) return `约 ${rough(total - tier2)} 度落在第二档，比按第一档多花约 ${rough((total - tier2) * (price2 - price1))} 元`
+  return '预计全年都在第一档'
+}
+
+/**
+ * 预计和对比，只用已保存的数据。
+ * 本月剩下的日子按最近的日均估算；后面的月份优先用去年同月的账单，因为用电随季节变化，日均估不准。
+ * 最新读数之后已经过去的日子也在用电，都算进“剩下的日子”。
+ */
+function buildOutlook(snapshot: Snapshot, settings: Settings, bills: MonthlyBill[]): Pick<DetailView, 'outlook' | 'outlookNote'> {
+  const outlook: DetailView['outlook'] = []
+  let outlookNote: string | null = null
+  const today = chinaTime(snapshot.fetchedAt)
+  const monthKey = today.isoDay.slice(0, 7)
+  const monthLast = `${monthKey}-${pad2(daysInMonth(today.year, today.month))}`
+  const previousMonthLast = addDays(`${monthKey}-01`, -1)
+  const billKwh = (month: string) => bills.find(bill => bill.month === month)?.kwh ?? null
+  const allReadings = realReadings(snapshot)
+  const recent = allReadings.slice(-DETAIL_DAYS)
+
+  if (recent.length >= MIN_DAYS_FOR_AVERAGE) {
+    const perDay = sumKwh(recent) / recent.length
+    const latest = recent[recent.length - 1].day
+    const counted = (floor: string) => daysBetween(latest > floor ? latest : floor, monthLast)
+    const monthForecast = (snapshot.monthKwh ?? 0) + perDay * counted(previousMonthLast)
+    const used = snapshot.yearEstimateKwh
+    const canPrice = used !== null && hasValidTiers(settings)
+    // 最新读数还在去年时，去年那几天不算今年的累计。
+    const yearAtMonthEnd = used === null ? null : Math.max(used + perDay * counted(`${today.year - 1}-12-31`), monthForecast)
+    const monthYuan = canPrice && yearAtMonthEnd !== null ? ` · 约 ${rough(segmentCost(yearAtMonthEnd - monthForecast, yearAtMonthEnd, settings))} 元` : ''
+    outlook.push({ label: '本月预计', value: `约 ${rough(monthForecast)} 度${monthYuan}` })
+
+    if (yearAtMonthEnd !== null) {
+      let total = yearAtMonthEnd
+      for (let month = today.month + 1; month <= 12; month++) {
+        total += billKwh(`${today.year - 1}-${pad2(month)}`) ?? perDay * daysInMonth(today.year, month)
+      }
+      // 已出账的部分用真实金额，只有后面的部分按单价估算。
+      const { yearKwh, yearYuan } = snapshot
+      const yearCost = yearKwh !== null && yearYuan !== null && total >= yearKwh ? yearYuan + segmentCost(yearKwh, total, settings) : segmentCost(0, total, settings)
+      outlook.push({ label: '全年预计', value: `约 ${rough(total)} 度${canPrice ? ` · 约 ${rough(yearCost)} 元` : ''}` })
+      if (canPrice) outlookNote = yearTierNote(total, settings)
+    }
+  }
+
+  const thisMonth = allReadings.filter(day => day.day.startsWith(monthKey))
+  if (thisMonth.length >= MIN_DAYS_FOR_AVERAGE) {
+    const previousKey = previousMonthLast.slice(0, 7)
+    const previousBill = billKwh(previousKey)
+    const previousReadings = allReadings.filter(day => day.day.startsWith(previousKey))
+    const baseline =
+      previousBill !== null
+        ? previousBill / Number(previousMonthLast.slice(8, 10))
+        : previousReadings.length >= MIN_DAYS_TO_COMPARE
+          ? sumKwh(previousReadings) / previousReadings.length
+          : 0
+    if (baseline > 0) {
+      const perDay = sumKwh(thisMonth) / thisMonth.length
+      outlook.push({ label: '本月日均', value: `${formatKwh(perDay)} 度 · ${changeText(perDay, baseline, '上月', '高', '低')}` })
+    }
+  }
+
+  const latestBill = bills[bills.length - 1]
+  if (latestBill?.kwh) {
+    const sameMonthLastYear = billKwh(`${Number(latestBill.month.slice(0, 4)) - 1}${latestBill.month.slice(4)}`)
+    if (sameMonthLastYear) {
+      outlook.push({ label: `${monthNumber(latestBill.month)}月用电`, value: `${formatKwh(latestBill.kwh)} 度 · ${changeText(latestBill.kwh, sameMonthLastYear, '去年同月', '多', '少')}` })
+    }
+  }
+  return { outlook, outlookNote }
+}
+
 export function buildDetailView(snapshot: Snapshot, account: Account, settings: Settings): DetailView {
   const readings = realReadings(snapshot).slice(-DETAIL_DAYS)
   const peak = readings.length ? readings.reduce((highest, day) => (day.kwh > highest.kwh ? day : highest)) : null
   const average = readings.length >= MIN_DAYS_FOR_AVERAGE ? sumKwh(readings) / readings.length : null
   // 旧版本存下的快照只有上期账单，下次刷新之前先显示这一条。
-  const bills = snapshot.bills?.length ? snapshot.bills : snapshot.lastBill ? [snapshot.lastBill] : []
+  const allBills = snapshot.bills?.length ? snapshot.bills : snapshot.lastBill ? [snapshot.lastBill] : []
+  const bills = allBills.slice(-DETAIL_BILL_MONTHS)
   const latestYear = bills.length ? bills[bills.length - 1].month.slice(0, 4) : ''
   return {
+    ...buildOutlook(snapshot, settings, allBills),
     bill: buildBillView(snapshot, account, settings, null),
     daily: readings.map(({ day, kwh }) => ({ day, kwh })),
     dailyAverage: average === null ? null : { kwh: average, text: `${formatKwh(average)} 度` },

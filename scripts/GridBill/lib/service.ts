@@ -29,7 +29,7 @@ const WIDGET_NETWORK_BUDGET = 25 * 1000
 const LOGIN_EXPIRED = '登录已过期，需要重新登录'
 /** 详情页的图表要看这么多天，小组件只要柱状图那几天。 */
 const DETAIL_CHART_DAYS = 30
-const BILL_HISTORY_MONTHS = 12
+const BILL_HISTORY_MONTHS = 24
 
 type Attempt<T> = { ok: true; value: T } | { ok: false }
 
@@ -195,13 +195,17 @@ export function createService(
     let lastBill = billing ? billing.bills[billing.bills.length - 1] ?? null : previous?.lastBill ?? null
     // 去年的账单不会再变，查到过就存下来，不再重复查。
     const knownBills = previous?.bills ?? []
-    const wantsLastYear = includeHistory && !knownBills.some(bill => bill.month.startsWith(`${today.year - 1}-`))
+    const wantsLastYear = includeHistory && previous?.billHistoryYear !== today.year - 1
     let lastYearBills: MonthlyBill[] = []
+    let billHistoryYear = previous?.billHistoryYear
     if (billing && (!lastBill || wantsLastYear)) {
       const needsLastBill = !lastBill
       // 已经有上期账单时这次只是补充历史，连网络错误也不能让整次更新作废。
       const lastYear = await attempt(() => client.monthlyBills(session, account, today.year - 1), !needsLastBill)
-      if (lastYear.ok) lastYearBills = lastYear.value.bills
+      if (lastYear.ok) {
+        lastYearBills = lastYear.value.bills
+        billHistoryYear = today.year - 1
+      }
       if (needsLastBill) lastBill = lastYear.ok ? lastYear.value.bills[lastYear.value.bills.length - 1] ?? null : previous?.lastBill ?? null
     }
     const billsByMonth = new Map<string, MonthlyBill>()
@@ -263,6 +267,7 @@ export function createService(
       monthKwh,
       lastBill,
       bills: [...billsByMonth.values()].sort((a, b) => a.month.localeCompare(b.month)).slice(-BILL_HISTORY_MONTHS),
+      billHistoryYear,
       yearKwh: billing ? billing.kwh : previousSameYear?.yearKwh ?? null,
       yearYuan: billing ? billing.yuan : previousSameYear?.yearYuan ?? null,
       yearEstimateKwh,

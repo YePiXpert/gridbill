@@ -283,6 +283,156 @@ test('详情页：今年已出账，缺一项显示 --，都缺时不显示', ()
   assert.equal(detail().yearSettled, null)
 })
 
+test('详情页：账单只显示最近 12 个月，多存的不显示', () => {
+  const bills = Array.from({ length: 24 }, (_, i) => bill(new Date(Date.UTC(2024, 10 + i, 1)).toISOString().slice(0, 7)))
+  const v = detail({ bills })
+  assert.equal(v.months.length, 12)
+  assert.equal(v.monthRows.length, 12)
+  assert.equal(v.monthRows[0].label, '10月')
+  assert.equal(v.monthRows[11].label, '2025年11月')
+})
+
+const outlookRow = (v, label) => v.outlook.find(row => row.label === label)?.value
+/** 北京时间 11 月 5 日，最新读数 11/3，日均 14 度，今年累计 4700 度。 */
+const november = { fetchedAt: NOV_5, monthKwh: 40, yearEstimateKwh: 4700, daily: readings(14) }
+
+test('本月预计：已用的加上剩下日子的日均，跨档的部分按第三档算', () => {
+  // 11/4–11/30 共 27 天 × 14 度 = 378 度，本月约 418 度。月底累计 5078 度：其中 140 度在第二档，278 度在第三档。
+  assert.equal(outlookRow(detail(november), '本月预计'), '约 420 度 · 约 290 元')
+  assert.equal(outlookRow(detail({ ...november, yearEstimateKwh: 3000 }), '本月预计'), '约 420 度 · 约 230 元', '全在第二档')
+})
+
+test('本月预计：最新读数还在上个月时，整个月都算剩下的日子', () => {
+  const v = detail({ fetchedAt: Date.UTC(2026, 10, 2, 1), monthKwh: null, yearEstimateKwh: 1000, daily: readings(14, () => 14, '2026-10-31') })
+  assert.equal(outlookRow(v, '本月预计'), '约 420 度 · 约 210 元', '30 天 × 14 度，全在第一档')
+  const lagging = detail({ fetchedAt: Date.UTC(2026, 10, 2, 1), monthKwh: null, yearEstimateKwh: 1000, daily: readings(14, () => 14, '2026-10-28') })
+  assert.match(outlookRow(lagging, '本月预计'), /^约 420 度/, '上个月没出数据的那几天不算本月')
+})
+
+test('本月预计：月底读数已经出来时，就是实际用电', () => {
+  const v = detail({ fetchedAt: Date.UTC(2026, 11, 1, 1), monthKwh: 400, yearEstimateKwh: 4000, daily: readings(14, () => 14, '2026-12-01') })
+  assert.match(outlookRow(v, '本月预计'), /^约 820 度/, '12/1 的读数之后还有 30 天')
+  const lastDay = detail({ fetchedAt: Date.UTC(2026, 10, 30, 15), monthKwh: 400, yearEstimateKwh: 4000, daily: readings(14, () => 14, '2026-11-30') })
+  assert.match(outlookRow(lastDay, '本月预计'), /^约 400 度/)
+})
+
+test('全年预计：没有去年账单时后面的月份也按日均算', () => {
+  // 4700 + 本月剩下 378 + 12 月 31 × 14 = 434，共 5512 度，超出第三档起点 712 度。
+  const v = detail(november)
+  assert.equal(outlookRow(v, '全年预计'), '约 5,500 度 · 约 3,000 元')
+  assert.equal(v.outlookNote, '约 710 度落在第三档，比按第二档多花约 180 元')
+})
+
+test('全年预计：后面的月份优先用去年同月的账单，因为用电随季节变化', () => {
+  const v = detail({ ...november, bills: [bill('2025-12', 600)] })
+  assert.equal(outlookRow(v, '全年预计'), '约 5,700 度 · 约 3,100 元', '4700 + 378 + 600')
+  assert.equal(v.outlookNote, '约 880 度落在第三档，比按第二档多花约 220 元')
+  assert.match(outlookRow(detail({ ...november, bills: [bill('2025-12', null)] }), '全年预计'), /^约 5,500 度/, '去年同月没有电量就退回日均')
+  assert.match(outlookRow(detail({ ...november, bills: [bill('2024-12', 600)] }), '全年预计'), /^约 5,500 度/, '只认去年的，不能拿更早的')
+})
+
+test('全年预计：已出账的部分用真实金额，只有后面的部分按单价估算', () => {
+  const v = detail({ ...november, yearKwh: 4000, yearYuan: 1900 })
+  assert.equal(outlookRow(v, '全年预计'), '约 5,500 度 · 约 2,900 元', '1900 + 800×0.5383 + 712×0.7883')
+  assert.match(outlookRow(detail({ ...november, yearKwh: 4000 }), '全年预计'), /约 3,000 元$/, '金额缺失时全部按单价算')
+  assert.match(outlookRow(detail({ ...november, yearKwh: 9000, yearYuan: 1 }), '全年预计'), /约 3,000 元$/, '已出账比预计还多时数据有问题，不用它')
+})
+
+test('全年预计：预计到不了第三档时说第二档，都在第一档时也说清楚', () => {
+  assert.equal(detail({ ...november, yearEstimateKwh: 3000 }).outlookNote, '约 930 度落在第二档，比按第一档多花约 47 元')
+  assert.equal(detail({ ...november, yearEstimateKwh: 1000 }).outlookNote, '预计全年都在第一档')
+})
+
+test('预计：十二月没有后面的月份，一月不把去年的日子算进今年', () => {
+  const december = detail({ fetchedAt: Date.UTC(2026, 11, 20, 1), monthKwh: 200, yearEstimateKwh: 4000, daily: readings(14, () => 14, '2026-12-18') })
+  assert.match(outlookRow(december, '本月预计'), /^约 380 度/, '200 + 13 × 14')
+  assert.match(outlookRow(december, '全年预计'), /^约 4,200 度/, '4000 + 13 × 14')
+  // 累计取 30 度：结果 5140 度显示成 5,100；要是多算了去年那两天（28 度）就是 5168 度，会显示成 5,200。
+  const january = latest => detail({ fetchedAt: Date.UTC(2027, 0, 2, 1), monthKwh: null, yearEstimateKwh: 30, daily: readings(14, () => 14, latest) })
+  assert.match(outlookRow(january('2026-12-31'), '全年预计'), /^约 5,100 度/, '30 + 365 × 14')
+  assert.match(outlookRow(january('2026-12-29'), '全年预计'), /^约 5,100 度/, '去年最后两天没出数据，也不算今年的')
+  assert.match(outlookRow(january('2026-12-29'), '本月预计'), /^约 430 度/)
+})
+
+test('预计：读数太少不预计，没有累计时只有本月电量，档位不对时不算钱', () => {
+  const few = detail({ ...november, daily: readings(2) })
+  assert.equal(outlookRow(few, '本月预计'), undefined)
+  assert.equal(outlookRow(few, '全年预计'), undefined)
+  assert.equal(few.outlookNote, null)
+
+  const noYear = detail({ ...november, yearEstimateKwh: null })
+  assert.equal(outlookRow(noYear, '本月预计'), '约 420 度')
+  assert.equal(outlookRow(noYear, '全年预计'), undefined)
+  assert.equal(noYear.outlookNote, null)
+
+  const badTiers = detail(november, { tier2: 0, tier3: 0 })
+  assert.equal(outlookRow(badTiers, '本月预计'), '约 420 度')
+  assert.equal(outlookRow(badTiers, '全年预计'), '约 5,500 度')
+  assert.equal(badTiers.outlookNote, null)
+})
+
+test('预计：一直没用电时也不出错', () => {
+  const v = detail({ ...november, monthKwh: 0, yearEstimateKwh: 0, daily: readings(14, () => 0) })
+  assert.equal(outlookRow(v, '本月预计'), '约 0 度 · 约 0 元')
+  assert.equal(v.outlookNote, '预计全年都在第一档')
+})
+
+test('和上月比：优先用上月账单换算成日均', () => {
+  const compare = kwh => outlookRow(detail({ ...november, bills: [bill('2026-10', kwh)] }), '本月日均')
+  assert.equal(compare(310), '14 度 · 比上月高 40%', '310 度 ÷ 31 天 = 10 度/天')
+  assert.equal(compare(620), '14 度 · 比上月低 30%')
+  assert.equal(compare(434), '14 度 · 和上月差不多')
+  assert.equal(compare(0), undefined, '上月没用电不能除以 0')
+})
+
+test('和上月比：天数按上个月实际算，一月和上一年的十二月比', () => {
+  const march = detail({ fetchedAt: Date.UTC(2026, 2, 5, 1), daily: readings(4, () => 14, '2026-03-04'), bills: [bill('2026-02', 280)] })
+  assert.equal(outlookRow(march, '本月日均'), '14 度 · 比上月高 40%', '280 度 ÷ 28 天')
+  const january = detail({ fetchedAt: Date.UTC(2027, 0, 5, 1), daily: readings(4, () => 14, '2027-01-04'), bills: [bill('2026-12', 310)] })
+  assert.equal(outlookRow(january, '本月日均'), '14 度 · 比上月高 40%')
+})
+
+test('和上月比：上月还没出账时用它的每日读数，太少就不比', () => {
+  const daily = readings(14, i => (i < 11 ? 10 : 20))
+  assert.equal(outlookRow(detail({ ...november, daily }), '本月日均'), '20 度 · 比上月高 100%', '10 月 11 天，11 月 3 天')
+  assert.equal(outlookRow(detail({ ...november, daily: readings(9) }), '本月日均'), undefined, '10 月只有 6 天')
+  assert.ok(outlookRow(detail({ ...november, daily: readings(10) }), '本月日均'), '10 月有 7 天就够了')
+})
+
+test('和上月比：本月读数少于 3 天不比', () => {
+  const v = detail({ fetchedAt: Date.UTC(2026, 10, 3, 1), daily: readings(14, () => 14, '2026-11-02'), bills: [bill('2026-10', 310)] })
+  assert.equal(outlookRow(v, '本月日均'), undefined)
+})
+
+test('和去年比：最新账单和去年同月的电量比，看的是度数不是金额', () => {
+  const compare = kwh => outlookRow(detail({ bills: [bill('2025-10', kwh, 999), bill('2026-10', 300, 1)] }), '10月用电')
+  assert.equal(compare(250), '300 度 · 比去年同月多 20%')
+  assert.equal(compare(400), '300 度 · 比去年同月少 25%')
+  assert.equal(compare(300), '300 度 · 和去年同月差不多')
+  assert.equal(compare(null), undefined)
+  assert.equal(compare(0), undefined)
+  assert.equal(outlookRow(detail({ bills: [bill('2026-10', 300)] }), '10月用电'), undefined, '没有去年同月')
+  assert.equal(outlookRow(detail({ bills: [bill('2025-10', 250), bill('2026-10', null)] }), '10月用电'), undefined, '今年这个月没有电量')
+})
+
+test('和去年比：用到的是多存的账单，超出 12 个月的显示范围也能比', () => {
+  const bills = Array.from({ length: 13 }, (_, i) => bill(new Date(Date.UTC(2025, 9 + i, 1)).toISOString().slice(0, 7), i === 0 ? 250 : 300))
+  const v = detail({ bills })
+  assert.equal(v.monthRows.length, 12)
+  assert.equal(outlookRow(v, '10月用电'), '300 度 · 比去年同月多 20%')
+})
+
+test('预计和对比：什么数据都没有时是空的', () => {
+  const v = detail()
+  assert.deepEqual(v.outlook, [])
+  assert.equal(v.outlookNote, null)
+})
+
+test('预计和对比：顺序固定', () => {
+  const v = detail({ ...november, bills: [bill('2025-10', 250), bill('2026-10', 300)] })
+  assert.deepEqual(v.outlook.map(row => row.label), ['本月预计', '全年预计', '本月日均', '10月用电'])
+})
+
 test('详情页：小组件那部分内容和小组件算出来的一样', () => {
   const patch = { yearEstimateKwh: 4700, monthKwh: 42, daily: readings(14), fetchedAt: NOV_5 }
   assert.deepEqual(detail(patch).bill, view(patch))

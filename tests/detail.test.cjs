@@ -201,6 +201,39 @@ test('月度账单：图表和列表都有 12 个月，列表最新的在前', (
   assert.doesNotMatch(allText(tree), /补满 12 个月/, '已经满了就不用提示')
 })
 
+test('预计和对比：放在图表前面，说明是粗估，也说清多花多少', () => {
+  signIn()
+  vault.saveSnapshot(snapshotFor('a'))
+  const tree = render()
+  const all = allText(tree)
+  assert.match(all, /预计和对比/)
+  assert.match(all, /只是粗估/)
+  assert.match(row(tree, '本月预计'), /^约 [\d,]+ 度 · 约 [\d,]+ 元$/)
+  assert.match(row(tree, '全年预计'), /^约 [\d,]+ 度 · 约 [\d,]+ 元$/)
+  assert.ok(findAll(tree, 'Text').some(node => /预计全年都在第一档|比按第.档多花/.test(texts(node).join(''))))
+  const titles = findAll(tree, 'LabeledContent').map(node => node.props.title)
+  assert.ok(titles.indexOf('全年预计') < titles.indexOf('日均'))
+  assert.ok(titles.indexOf('今年累计') < titles.indexOf('本月预计'))
+})
+
+test('预计和对比：算不出来时整段不显示', () => {
+  signIn()
+  vault.saveSnapshot(snapshotFor('a', { daily: [], bills: [], lastBill: null }))
+  const tree = render()
+  assert.doesNotMatch(allText(tree), /预计和对比/)
+  assert.equal(row(tree, '本月预计'), undefined)
+})
+
+test('月度账单：存了 24 个月也只显示最近 12 个月', () => {
+  signIn()
+  const bills = Array.from({ length: 24 }, (_, i) => bill(new Date(Date.UTC(2024, 10 + i, 1)).toISOString().slice(0, 7), 100 + i))
+  vault.saveSnapshot(snapshotFor('a', { bills }))
+  const tree = render()
+  assert.equal(findAll(tree, 'BarChart')[1].props.marks.length, 12)
+  assert.doesNotMatch(allText(tree), /补满 12 个月/)
+  assert.equal(row(tree, '2024年11月'), undefined)
+})
+
 test('月度账单：不满 12 个月时提示可以补，旧快照先显示上期账单', () => {
   signIn()
   vault.saveSnapshot(snapshotFor('a', { bills: undefined }))

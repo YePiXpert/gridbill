@@ -190,6 +190,19 @@ export function DetailPage({ initial }: { initial: DetailState }) {
           ) : null}
         </Section>
 
+        {view && view.outlook.length > 0 ? (
+          <Section header={<Text>预计和对比</Text>} footer={<Text>本月剩下的日子按最近的日均估算，后面的月份优先按去年同月估算。只是粗估，以官方账单为准。</Text>}>
+            {view.outlook.map(row => (
+              <LabeledContent key={row.label} title={row.label} value={row.value} />
+            ))}
+            {view.outlookNote ? (
+              <Text font="caption" foregroundStyle={SECONDARY}>
+                {view.outlookNote}
+              </Text>
+            ) : null}
+          </Section>
+        ) : null}
+
         {view ? (
           <Section
             header={<Text>{view.daily.length > 0 ? `最近 ${view.daily.length} 天` : '每日用电'}</Text>}

@@ -449,21 +449,65 @@ test('账单：设置页和登录后的刷新也不多查去年', async () => {
   assert.deepEqual(monthlyYears(server), [2026])
 })
 
-test('账单：详情页刷新补上去年的，只留最近 12 个月，查到过就不再查', async () => {
+test('账单：详情页刷新补上去年的，查到过就不再查', async () => {
   const { service, server } = await signedIn(withBills)
   await service.refreshNow('acct-1', FOR_DETAIL)
   assert.deepEqual(monthlyYears(server), [2026, 2025])
   const months = vault.snapshot('acct-1').bills.map(b => b.month)
-  assert.equal(months.length, 12)
-  assert.equal(months[0], '2025-11')
-  assert.equal(months[11], '2026-10')
+  assert.equal(months.length, 22, '去年 12 个月加今年 10 个月')
+  assert.equal(months[0], '2025-01')
+  assert.equal(months[21], '2026-10')
   assert.deepEqual([...months].sort(), months, '时间升序')
   assert.equal(vault.snapshot('acct-1').lastBill.month, '2026-10', '上期账单还是今年最新的')
+  assert.equal(vault.snapshot('acct-1').billHistoryYear, 2025)
 
   server.requests.length = 0
   await service.refreshNow('acct-1', FOR_DETAIL)
   assert.deepEqual(monthlyYears(server), [2026], '去年的不再查')
-  assert.equal(vault.snapshot('acct-1').bills.length, 12)
+  assert.equal(vault.snapshot('acct-1').bills.length, 22)
+})
+
+test('账单：最多存 24 个月，留下的是最新的', async () => {
+  const { service, clock } = await signedIn(withBills)
+  await service.loadWidgetModel('')
+  const many = Array.from({ length: 30 }, (_, i) => ({ month: new Date(Date.UTC(2023, i, 1)).toISOString().slice(0, 7), kwh: 1, yuan: 1, endDay: null }))
+  vault.saveSnapshot({ ...vault.snapshot('acct-1'), bills: many })
+  clock.t += 13 * HOUR
+  await service.loadWidgetModel('')
+  const months = vault.snapshot('acct-1').bills.map(b => b.month)
+  assert.equal(months.length, 24)
+  assert.equal(months[23], '2026-10')
+})
+
+test('账单：之前只存了 12 个月的快照，详情页刷新时再查一次去年，补上同比要用的月份', async () => {
+  const { service, server } = await signedIn(withBills)
+  await service.refreshNow('acct-1', FOR_DETAIL)
+  const { billHistoryYear, ...old } = vault.snapshot('acct-1')
+  assert.equal(billHistoryYear, 2025)
+  vault.saveSnapshot({ ...old, bills: old.bills.slice(-12) })
+  server.requests.length = 0
+  await service.refreshNow('acct-1', FOR_DETAIL)
+  assert.deepEqual(monthlyYears(server), [2026, 2025])
+  assert.equal(vault.snapshot('acct-1').bills[0].month, '2025-01')
+  server.requests.length = 0
+  await service.refreshNow('acct-1', FOR_DETAIL)
+  assert.deepEqual(monthlyYears(server), [2026], '补过一次就不再查')
+})
+
+test('账单：到了新的一年，详情页刷新会查刚过去的那一年，也只查一次', async () => {
+  const oneBill = payload => ok({ list: [{ month: `${payload.data.year}01`, monthPq: '100', monthAmt: '50' }] })
+  const { service, server, clock } = await signedIn({ daily: everyDayInRange('2026-11-03'), monthly: oneBill })
+  await service.refreshNow('acct-1', FOR_DETAIL)
+  assert.equal(vault.snapshot('acct-1').billHistoryYear, 2025)
+  clock.t = Date.UTC(2027, 1, 10, 2)
+  server.handlers.daily = everyDayInRange('2027-02-08')
+  server.requests.length = 0
+  await service.refreshNow('acct-1', FOR_DETAIL)
+  assert.deepEqual(monthlyYears(server), [2027, 2026])
+  assert.equal(vault.snapshot('acct-1').billHistoryYear, 2026)
+  server.requests.length = 0
+  await service.refreshNow('acct-1', FOR_DETAIL)
+  assert.deepEqual(monthlyYears(server), [2027])
 })
 
 test('账单：后台先存了今年的，详情页再补去年的，顺序和范围都对', async () => {
@@ -473,9 +517,9 @@ test('账单：后台先存了今年的，详情页再补去年的，顺序和�
   await service.refreshNow('acct-1', FOR_DETAIL)
   assert.deepEqual(monthlyYears(server), [2026, 2025])
   const months = vault.snapshot('acct-1').bills.map(b => b.month)
-  assert.equal(months.length, 12)
-  assert.equal(months[0], '2025-11', '留下的是最近 12 个月，不是先存进来的那些')
-  assert.equal(months[11], '2026-10')
+  assert.equal(months.length, 22)
+  assert.equal(months[0], '2025-01', '后存进来的去年账单要排到前面')
+  assert.equal(months[21], '2026-10')
   assert.deepEqual([...months].sort(), months)
 })
 
@@ -484,7 +528,8 @@ test('账单：后台刷新不会弄丢详情页查到的去年账单', async ()
   await service.refreshNow('acct-1', FOR_DETAIL)
   clock.t += 13 * HOUR
   await service.loadWidgetModel('')
-  assert.equal(vault.snapshot('acct-1').bills[0].month, '2025-11')
+  assert.equal(vault.snapshot('acct-1').bills[0].month, '2025-01')
+  assert.equal(vault.snapshot('acct-1').billHistoryYear, 2025)
 })
 
 test('账单：查去年失败不影响这次更新，下次再试，网络错误也一样', async () => {
@@ -494,8 +539,9 @@ test('账单：查去年失败不影响这次更新，下次再试，网络错�
     assert.equal(snapshot.bills.length, 10)
     assert.ok(snapshot.balance, '后面的余额查询不能被耽误')
     assert.equal(service.state().block, null)
+    assert.equal(snapshot.billHistoryYear, undefined, '没查到就不能记成查过')
     server.handlers.monthly = billsByYear
-    assert.equal((await service.refreshNow('acct-1', FOR_DETAIL)).bills.length, 12)
+    assert.equal((await service.refreshNow('acct-1', FOR_DETAIL)).bills.length, 22)
   }
 })
 
@@ -512,7 +558,7 @@ test('账单：今年的查询失败时，已保存的账单不丢', async () =>
   server.requests.length = 0
   await service.refreshNow('acct-1', FOR_DETAIL)
   assert.deepEqual(monthlyYears(server), [2026], '今年的都查不到，去年的也不用试了')
-  assert.equal(vault.snapshot('acct-1').bills.length, 12)
+  assert.equal(vault.snapshot('acct-1').bills.length, 22)
   assert.equal(vault.snapshot('acct-1').lastBill.month, '2026-10')
 })
 
@@ -524,6 +570,7 @@ test('账单：一月还没有今年的账单时，查到的去年账单也存�
   const snapshot = vault.snapshot('acct-1')
   assert.equal(snapshot.lastBill.month, '2026-10')
   assert.equal(snapshot.bills.length, 10)
+  assert.equal(snapshot.billHistoryYear, 2026, '这次查到了，详情页不用再查一遍')
 })
 
 test('账单：旧版本存下的快照没有账单字段，刷新时正常补上', async () => {

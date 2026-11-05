@@ -53,8 +53,10 @@ export type Snapshot = {
   balance: Balance | null
   monthKwh: number | null
   lastBill: MonthlyBill | null
-  /** 最近 12 个月的账单，时间升序。旧版本存下的快照没有这个字段 */
+  /** 最近 24 个月的账单，时间升序，同比和全年预计要用。旧版本存下的快照没有这个字段 */
   bills?: MonthlyBill[]
+  /** 已经查过哪一年的完整账单。去年的账单不会再变，查过就不再查 */
+  billHistoryYear?: number
   yearKwh: number | null
   yearYuan: number | null
   /** 今年累计电量估算：已结算 + 结算之后的每日用电，用于阶梯 */
