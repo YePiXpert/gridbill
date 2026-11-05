@@ -6,7 +6,7 @@ const { lib, resetStores } = require('./support/shim.cjs')
 const { createMockServer, TEST_KEYS, ok, fail } = require('./support/mock-server.cjs')
 
 const { md5Hex } = lib('protocol/bytes')
-const { SgccClient, SgccError, API_BASE, buildLoginParams, loginHeaderMd5, chinaTime, buildEnvelope, openEnvelope } = lib('protocol/client')
+const { SgccClient, SgccError, API_BASE, buildLoginParams, buildSmsLoginParams, loginHeaderMd5, chinaTime, buildEnvelope, openEnvelope } = lib('protocol/client')
 const parse = lib('protocol/parse')
 const gm = lib('protocol/gm')
 const { utf8Encode, utf8Decode } = lib('protocol/bytes')
@@ -128,11 +128,62 @@ test('查询参数和上游 build_*_payload 一致', async () => {
   assert.deepEqual(balance.data.list, [{ consNoSrc: 'src', proCode: '11102', sceneType: '02', consNo: 'enc', orgNo: 'org' }])
 })
 
-test('短信只发 logindevice 类型', async () => {
+test('新设备短信只发 logindevice 类型', async () => {
   const server = createMockServer()
   assert.equal(await makeClient(server).sendDeviceSms(), 'code-key-1')
   assert.equal(server.requests[0].payload.quInfo.businessType, 'logindevice')
   assert.equal(server.requests[0].payload.quInfo.account, '13800000000')
+})
+
+test('验证码登录的参数和请求头 md5 与上游 login.py 算出的结果逐字一致', () => {
+  const params = buildSmsLoginParams('11111111111', '123456', 'one-shot-key')
+  // 这两个值是用上游的 build_sms_login_map 和 login_header_md5 算出来的。
+  assert.equal(
+    JSON.stringify(params),
+    '{"quInfo":{"account":"11111111111","businessType":"login","code":"123456","optSys":"Android","pushId":"000000,000000","codeKey":"one-shot-key"},' +
+      '"uscInfo":{"isEncrypt":"false","devciceIp":"127.0.0.1","devciceId":"000000","tenant":"state_grid","member":"2202","optSys":"Android 13","operatorType":"","devciceName":"sdk_gphone64_arm64","pushId":"000000,000000"}}',
+  )
+  assert.equal(loginHeaderMd5(params), '96fdda85a9de0650c3e9bdc403ecc326')
+})
+
+test('验证码登录：发 login 类型的短信，登录走 c2/f02，请求头和密码登录一样', async () => {
+  const server = createMockServer()
+  const client = makeClient(server)
+  const codeKey = await client.sendLoginSms()
+  assert.equal(codeKey, 'code-key-1')
+  const { session, accounts } = await client.smsLogin('123456', codeKey)
+  assert.equal(session.token, 'token-1')
+  assert.equal(session.userId, 'user-1')
+  assert.equal(accounts.length, 2)
+
+  const [send, login] = server.requests
+  assert.equal(send.route, 'sms')
+  assert.equal(send.payload.quInfo.businessType, 'login')
+  assert.equal(send.payload.quInfo.account, '13800000000')
+  assert.equal(send.headers.md5, undefined, '和上游一样，发短信不带 md5')
+
+  assert.equal(login.route, 'smsLogin')
+  assert.equal(login.payload.quInfo.code, '123456')
+  assert.equal(login.payload.quInfo.codeKey, 'code-key-1')
+  assert.ok(!('password' in login.payload.quInfo), '这条路径不发密码')
+  assert.equal(login.headers.md5, loginHeaderMd5(login.payload))
+  assert.match(login.headers.timeStamp, /^\d{14}$/, '登录用 14 位时间')
+  assert.equal(login.headers.AppGuid, send.headers.AppGuid, '发码和登录是同一个设备身份')
+})
+
+test('验证码登录的错误分类：风控和新设备单独处理，其他拒绝都算账号问题', async () => {
+  const cases = [
+    [fail('RK008', '网络连接超时 (RK008),请重试!'), 'risk'],
+    [fail('4006', '新设备'), 'device'],
+    [fail('1001', '验证码错误'), 'credentials'],
+    [ok({ bizrt: {} }), 'credentials'],
+  ]
+  for (const [response, kind] of cases) {
+    const server = createMockServer({ smsLogin: () => response })
+    await assert.rejects(makeClient(server).smsLogin('123456', 'k'), error => error instanceof SgccError && error.kind === kind, `应为 ${kind}`)
+  }
+  const blocked = createMockServer({ sms: () => fail('RK008') })
+  await assert.rejects(makeClient(blocked).sendLoginSms(), error => error.kind === 'risk' && error.code === 'RK008')
 })
 
 test('RK 开头的代码都算风控，不能当成密码错误，错误里带上具体代码', async () => {

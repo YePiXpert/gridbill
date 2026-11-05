@@ -15,6 +15,7 @@ export const API_BASE = 'https://csc-service.sgcc.com.cn:28630/'
 
 const PATH_LOGIN = 'emss-uia-center-front/member/c2/f01'
 const PATH_SMS = 'emss-uia-center-front/member/c1/f01'
+const PATH_SMS_LOGIN = 'emss-uia-center-front/member/c2/f02'
 const PATH_DAILY = 'emss-bia-bill-front/member/c11/f01'
 const PATH_MONTHLY = 'emss-bia-bill-front/member/c51/f04'
 const PATH_BALANCE = 'emss-bia-balance-front/member/c16/f01'
@@ -124,8 +125,21 @@ export function generateCheckCode(account: string, timestamp: number, random24?:
   return prefix + toHex(aes256EcbEncrypt(utf8Encode(`${account}${timestamp}`), CHECK_CODE_KEY))
 }
 
+const LOGIN_PUSH_ID = '000000,000000'
+
+const loginUscInfo = () => ({
+  isEncrypt: 'false',
+  devciceIp: '127.0.0.1',
+  devciceId: '000000',
+  tenant: 'state_grid',
+  member: '2202',
+  optSys: 'Android 13',
+  operatorType: '',
+  devciceName: DEVICE_MODEL,
+  pushId: LOGIN_PUSH_ID,
+})
+
 export function buildLoginParams(phone: string, passwordMd5: string, timestamp: number, sms?: { code: string; codeKey: string }, random24?: string) {
-  const pushId = '000000,000000'
   return {
     quInfo: {
       code: sms?.code ?? '',
@@ -133,24 +147,29 @@ export function buildLoginParams(phone: string, passwordMd5: string, timestamp: 
       account: phone,
       password: passwordMd5,
       optSys: 'Android',
-      pushId,
+      pushId: LOGIN_PUSH_ID,
       addressCity: '',
       addressProvince: '',
       addressRegion: '',
     },
-    uscInfo: {
-      isEncrypt: 'false',
-      devciceIp: '127.0.0.1',
-      devciceId: '000000',
-      tenant: 'state_grid',
-      member: '2202',
-      optSys: 'Android 13',
-      operatorType: '',
-      devciceName: DEVICE_MODEL,
-      pushId,
-    },
+    uscInfo: loginUscInfo(),
     checkCode: generateCheckCode(phone, timestamp, random24),
     avalonValidCode: '',
+  }
+}
+
+/** 和上游 build_sms_login_map 一致：没有密码，也没有 checkCode 和 avalonValidCode。 */
+export function buildSmsLoginParams(phone: string, code: string, codeKey: string) {
+  return {
+    quInfo: {
+      account: phone,
+      businessType: 'login',
+      code,
+      optSys: 'Android',
+      pushId: LOGIN_PUSH_ID,
+      codeKey,
+    },
+    uscInfo: loginUscInfo(),
   }
 }
 
@@ -294,7 +313,16 @@ export class SgccClient {
   /** 密码只以 MD5 的形式传入，协议本身也只需要 MD5。 */
   async login(passwordMd5: string, sms?: { code: string; codeKey: string }): Promise<{ session: Session; accounts: Account[] }> {
     const params = buildLoginParams(this.options.phone, passwordMd5, this.now(), sms)
-    const response = await this.post(PATH_LOGIN, params, null, params)
+    return this.finishLogin(await this.post(PATH_LOGIN, params, null, params))
+  }
+
+  /** 验证码登录。上游的接口层有这条路径，但它的配置界面没有用到，真实账号上还没验证过。 */
+  async smsLogin(code: string, codeKey: string): Promise<{ session: Session; accounts: Account[] }> {
+    const params = buildSmsLoginParams(this.options.phone, code, codeKey)
+    return this.finishLogin(await this.post(PATH_SMS_LOGIN, params, null, params))
+  }
+
+  private finishLogin(response: Json): { session: Session; accounts: Account[] } {
     let data: Json
     try {
       data = unwrap(response)
@@ -322,10 +350,19 @@ export class SgccClient {
   }
 
   /** 发送新设备验证短信，返回一次性的 codeKey。只能由用户在界面上明确触发。 */
-  async sendDeviceSms(): Promise<string> {
+  sendDeviceSms(): Promise<string> {
+    return this.sendSms('logindevice')
+  }
+
+  /** 发送验证码登录的短信，返回一次性的 codeKey。只能由用户在界面上明确触发。 */
+  sendLoginSms(): Promise<string> {
+    return this.sendSms('login')
+  }
+
+  private async sendSms(businessType: 'logindevice' | 'login'): Promise<string> {
     const payload = {
       uscInfo: { tenant: 'state_grid', member: '2202', devciceId: '000000', devciceName: DEVICE_MODEL, devciceIp: '127.0.0.1' },
-      quInfo: { voiceCodeFlag: false, account: this.options.phone, sendType: 0, businessType: 'logindevice' },
+      quInfo: { voiceCodeFlag: false, account: this.options.phone, sendType: 0, businessType },
     }
     const data = unwrap(await this.post(PATH_SMS, payload, null))
     const codeKey = data.bizrt?.codeKey

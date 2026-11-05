@@ -8,7 +8,7 @@ const { resetStores } = require('./support/shim.cjs')
 
 const { WidgetRoot, amountFontSize } = require('../.build/GridBill/ui/widget-views')
 const { SettingsPage, describeError, loadInitialState } = require('../.build/GridBill/ui/settings')
-const { SgccError } = require('../.build/GridBill/lib/protocol/client')
+const { SgccClient, SgccError } = require('../.build/GridBill/lib/protocol/client')
 const { buildBillView, demoSnapshot } = require('../.build/GridBill/lib/view-model')
 const { DEFAULT_SETTINGS } = require('../.build/GridBill/lib/types')
 const { loadSettings, vault } = require('../.build/GridBill/lib/vault')
@@ -331,4 +331,267 @@ test('设置页：被闸门拦下时提示并要求重新登录', () => {
   assert.ok(titles(tree).includes('密码'))
   assert.ok(button(tree, '立即刷新').props.disabled)
   assert.ok(!titles(tree).includes('取消'), '闸门关着时不能取消，必须处理')
+})
+
+const loginMode = tree => findAll(tree, 'Picker').find(node => node.props.title === '登录方式')
+
+/** 替换协议客户端的方法，界面流程不联网也能走完。返回还原函数。 */
+function stubClient(methods) {
+  const originals = {}
+  for (const [name, method] of Object.entries(methods)) {
+    originals[name] = SgccClient.prototype[name]
+    SgccClient.prototype[name] = method
+  }
+  return () => Object.assign(SgccClient.prototype, originals)
+}
+
+/** 打开设置页，切到验证码登录并填好手机号。 */
+function mountCodeForm() {
+  const page = mountSettings()
+  loginMode(page.tree()).props.onChanged('code')
+  page.field('手机号').props.onChanged('13812345678')
+  return page
+}
+
+const LOGIN_RESULT = () => ({ session: { token: 't', userId: 'u', province: '', expiresAt: Date.now() + 86400000 }, accounts: [ACCOUNT] })
+
+test('设置页：默认密码登录，切到验证码登录后没有密码框，发过验证码才能登录', async () => {
+  resetStores()
+  const restoreClient = stubClient({ sendLoginSms: async () => 'key-1' })
+  const page = mountSettings()
+  try {
+    const before = page.tree()
+    assert.equal(loginMode(before).props.value, 'password')
+    assert.equal(loginMode(before).props.pickerStyle, 'segmented')
+    loginMode(before).props.onChanged('code')
+
+    const names = titles(page.tree())
+    assert.ok(!names.includes('密码'))
+    assert.ok(names.includes('发送验证码'))
+    assert.ok(names.includes('短信验证码'))
+    assert.ok(button(page.tree(), '发送验证码').props.disabled, '没填手机号不能发')
+
+    page.field('手机号').props.onChanged('13812345678')
+    assert.equal(button(page.tree(), '发送验证码').props.disabled, false)
+    page.field('短信验证码').props.onChanged('123456')
+    assert.ok(button(page.tree(), '登录').props.disabled, '没发过验证码不能登录')
+
+    await button(page.tree(), '发送验证码').props.action()
+    assert.match(texts(page.tree()).join(' '), /验证码已发送/)
+    assert.equal(button(page.tree(), '登录').props.disabled, false)
+
+    loginMode(page.tree()).props.onChanged('password')
+    assert.ok(titles(page.tree()).includes('密码'))
+    assert.ok(!titles(page.tree()).includes('发送验证码'), '切回密码登录后短信按钮又只在国网要求时才出现')
+  } finally {
+    page.restore()
+    restoreClient()
+  }
+})
+
+test('设置页：验证码登录走完整流程，发的是登录短信，不保存密码，完成后收起表单', async () => {
+  resetStores()
+  const calls = []
+  const restoreClient = stubClient({
+    async sendLoginSms() {
+      calls.push(['sendLoginSms', this.options.phone])
+      return 'key-1'
+    },
+    async sendDeviceSms() {
+      throw new Error('不该发新设备短信')
+    },
+    async login() {
+      throw new Error('不该走密码登录')
+    },
+    async smsLogin(code, codeKey) {
+      calls.push(['smsLogin', code, codeKey])
+      return LOGIN_RESULT()
+    },
+  })
+  const page = mountCodeForm()
+  try {
+    await button(page.tree(), '发送验证码').props.action()
+    page.field('短信验证码').props.onChanged(' 123456 ')
+    await button(page.tree(), '登录').props.action()
+    assert.deepEqual(calls, [['sendLoginSms', '13812345678'], ['smsLogin', '123456', 'key-1']])
+    assert.deepEqual(vault.credentials(), { phone: '13812345678', passwordMd5: null })
+    const tree = page.tree()
+    assert.ok(!titles(tree).includes('短信验证码'))
+    assert.ok(titles(tree).includes('重新登录'))
+    assert.match(texts(tree).join(' '), /登录成功/)
+    assert.equal(button(tree, '立即刷新').props.disabled, false)
+  } finally {
+    page.restore()
+    restoreClient()
+  }
+})
+
+test('设置页：验证码登录收到新设备要求时切回密码登录，手上的验证码作废', async () => {
+  resetStores()
+  const restoreClient = stubClient({
+    sendLoginSms: async () => 'key-1',
+    async smsLogin() {
+      throw new SgccError('device', '4006', '国网要求验证新设备')
+    },
+  })
+  const page = mountCodeForm()
+  try {
+    await button(page.tree(), '发送验证码').props.action()
+    page.field('短信验证码').props.onChanged('123456')
+    await button(page.tree(), '登录').props.action()
+    const tree = page.tree()
+    assert.equal(loginMode(tree).props.value, 'password')
+    assert.ok(titles(tree).includes('密码'))
+    assert.ok(titles(tree).includes('验证并登录'))
+    assert.equal(page.field('短信验证码').props.value, '')
+    assert.match(texts(tree).join(' '), /填好密码/)
+    assert.equal(vault.credentials(), null)
+  } finally {
+    page.restore()
+    restoreClient()
+  }
+})
+
+test('设置页：验证码登录被风控拦下时显示代码，不保存账号，提示短信不一定有用', async () => {
+  resetStores()
+  const restoreClient = stubClient({
+    sendLoginSms: async () => 'key-1',
+    async smsLogin() {
+      throw new SgccError('risk', 'RK008', 'x')
+    },
+  })
+  const page = mountCodeForm()
+  try {
+    await button(page.tree(), '发送验证码').props.action()
+    page.field('短信验证码').props.onChanged('123456')
+    await button(page.tree(), '登录').props.action()
+    const all = texts(page.tree()).join(' ')
+    assert.match(all, /RK008/)
+    assert.match(all, /不要反复重试/)
+    assert.match(all, /短信不一定能解决/)
+    assert.equal(vault.credentials(), null)
+    assert.ok(titles(page.tree()).includes('短信验证码'), '表单还在')
+  } finally {
+    page.restore()
+    restoreClient()
+  }
+})
+
+test('设置页：切换登录方式不能绕过发送验证码的冷却时间', async () => {
+  resetStores()
+  let sends = 0
+  const restoreClient = stubClient({
+    async sendLoginSms() {
+      sends++
+      return 'key-1'
+    },
+  })
+  const page = mountCodeForm()
+  try {
+    await button(page.tree(), '发送验证码').props.action()
+    loginMode(page.tree()).props.onChanged('password')
+    loginMode(page.tree()).props.onChanged('code')
+    await button(page.tree(), '发送验证码').props.action()
+    assert.equal(sends, 1)
+    assert.match(texts(page.tree()).join(' '), /秒后再发送/)
+  } finally {
+    page.restore()
+    restoreClient()
+  }
+})
+
+test('设置页：改了手机号，之前的验证码就作废', async () => {
+  resetStores()
+  const restoreClient = stubClient({ sendLoginSms: async () => 'key-1' })
+  const page = mountCodeForm()
+  try {
+    await button(page.tree(), '发送验证码').props.action()
+    page.field('短信验证码').props.onChanged('123456')
+    assert.equal(button(page.tree(), '登录').props.disabled, false)
+    page.field('手机号').props.onChanged('13900000000')
+    assert.equal(page.field('短信验证码').props.value, '')
+    assert.ok(button(page.tree(), '登录').props.disabled)
+  } finally {
+    page.restore()
+    restoreClient()
+  }
+})
+
+test('设置页：只用验证码登录过且已到期时，直接显示验证码登录的表单，不能刷新', () => {
+  resetStores()
+  vault.saveCredentials({ phone: '13812345678', passwordMd5: null })
+  vault.saveAccounts([ACCOUNT])
+  const tree = renderSettings()
+  assert.match(texts(tree).join(' '), /登录已过期/)
+  assert.equal(loginMode(tree).props.value, 'code')
+  assert.ok(titles(tree).includes('发送验证码'))
+  assert.ok(!titles(tree).includes('密码'))
+  assert.ok(button(tree, '立即刷新').props.disabled)
+  assert.ok(button(tree, '诊断每日数据').props.disabled)
+  assert.ok(!titles(tree).includes('取消'), '已经过期，没有可以退回去的状态')
+})
+
+test('设置页：只用验证码登录过且还有效时，收起表单；重新登录的确认框不说会自动续', async () => {
+  resetStores()
+  vault.saveCredentials({ phone: '13812345678', passwordMd5: null })
+  vault.saveSession({ token: 't', userId: 'u', province: '', expiresAt: Date.now() + 86400000 })
+  vault.saveAccounts([ACCOUNT])
+  const page = mountSettings()
+  const original = globalThis.Dialog.confirm
+  try {
+    const tree = page.tree()
+    assert.ok(!titles(tree).includes('发送验证码'))
+    assert.doesNotMatch(texts(tree).join(' '), /登录已过期/)
+    assert.equal(button(tree, '立即刷新').props.disabled, false)
+    const shown = []
+    globalThis.Dialog.confirm = async options => {
+      shown.push(options)
+      return true
+    }
+    await button(tree, '重新登录').props.action()
+    assert.match(shown[0].message, /通常不需要重新登录/)
+    assert.doesNotMatch(shown[0].message, /自动续/)
+    assert.equal(loginMode(page.tree()).props.value, 'code')
+  } finally {
+    globalThis.Dialog.confirm = original
+    page.restore()
+  }
+})
+
+test('设置页：用密码登录时，重新登录的确认框仍然说明到期会自动续', async () => {
+  signedInStores()
+  const page = mountSettings()
+  const original = globalThis.Dialog.confirm
+  try {
+    const shown = []
+    globalThis.Dialog.confirm = async options => {
+      shown.push(options)
+      return false
+    }
+    await button(page.tree(), '重新登录').props.action()
+    assert.match(shown[0].message, /到期后会自动续/)
+  } finally {
+    globalThis.Dialog.confirm = original
+    page.restore()
+  }
+})
+
+test('设置页：重新登录中取消时，已经填的验证码不留下', async () => {
+  signedInStores()
+  const restoreClient = stubClient({ sendLoginSms: async () => 'key-1' })
+  const page = mountSettings()
+  try {
+    await button(page.tree(), '重新登录').props.action()
+    loginMode(page.tree()).props.onChanged('code')
+    await button(page.tree(), '发送验证码').props.action()
+    page.field('短信验证码').props.onChanged('123456')
+    button(page.tree(), '取消').props.action()
+    assert.ok(!titles(page.tree()).includes('短信验证码'))
+    await button(page.tree(), '重新登录').props.action()
+    assert.equal(page.field('短信验证码').props.value, '')
+    assert.ok(button(page.tree(), '登录').props.disabled, '要重新发码')
+  } finally {
+    page.restore()
+    restoreClient()
+  }
 })

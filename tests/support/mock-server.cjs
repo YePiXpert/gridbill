@@ -31,6 +31,7 @@ const defaults = {
         },
       },
     }),
+  smsLogin: () => defaults.login(),
   sms: () => ok({ bizrt: { codeKey: 'code-key-1' } }),
   daily: payload => {
     const start = payload.data.startTime
@@ -60,6 +61,7 @@ const defaults = {
 
 const ROUTES = {
   'emss-uia-center-front/member/c2/f01': 'login',
+  'emss-uia-center-front/member/c2/f02': 'smsLogin',
   'emss-uia-center-front/member/c1/f01': 'sms',
   'emss-bia-bill-front/member/c11/f01': 'daily',
   'emss-bia-bill-front/member/c51/f04': 'monthly',

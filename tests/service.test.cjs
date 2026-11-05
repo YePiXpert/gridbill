@@ -92,6 +92,224 @@ test('设备身份在多次登录之间保持不变', async () => {
   assert.equal(guids.size, 1, '改密码后设备不变，不会触发新设备验证')
 })
 
+/** 走完验证码登录：先发码，再带 codeKey 登录。 */
+async function signInByCode(service, phone = '13800000000') {
+  const codeKey = await service.requestLoginCode(phone)
+  return service.signInWithCode(phone, '123456', codeKey)
+}
+
+test('验证码登录：发 login 类型的短信，不走密码接口，不保存密码和 codeKey', async () => {
+  const { service, server } = setup()
+  const state = await signInByCode(service)
+  assert.equal(state.signedIn, true)
+  assert.equal(state.canAutoLogin, false)
+  assert.equal(state.accounts.length, 2)
+  assert.ok(state.sessionExpiresAt > START)
+  assert.deepEqual(vault.credentials(), { phone: '13800000000', passwordMd5: null })
+  assert.equal(server.requests[0].payload.quInfo.businessType, 'login')
+  assert.equal(server.count('sms'), 1)
+  assert.equal(server.count('smsLogin'), 1)
+  assert.equal(server.count('login'), 0)
+  assert.ok(!everything().includes('code-key-1'), 'codeKey 不落地')
+})
+
+test('验证码登录后小组件用这次的登录正常查询', async () => {
+  const { service, server } = setup()
+  await signInByCode(service)
+  const model = await service.loadWidgetModel('')
+  assert.equal(model.state, 'ok')
+  assert.equal(model.view.notice, null)
+  assert.equal(server.count('login'), 0)
+  assert.equal(server.count('sms'), 1, '只有用户点的那一次')
+})
+
+test('验证码登录：格式不对、没有手机号或 codeKey 时不联网', async () => {
+  const { service, server } = setup()
+  await assert.rejects(service.signInWithCode('13800000000', '12345', 'k'), error => error.code === 'bad-code')
+  await assert.rejects(service.signInWithCode('13800000000', '12345a', 'k'), error => error.code === 'bad-code')
+  await assert.rejects(service.signInWithCode('13800000000', '123456', ''), error => error.code === 'no-code-key')
+  await assert.rejects(service.signInWithCode('', '123456', 'k'), error => error.code === 'empty')
+  assert.equal(server.requests.length, 0)
+})
+
+test('验证码错误时什么都不保存，小组件不会联网', async () => {
+  const { service, server } = setup({ smsLogin: () => fail('1001', '验证码错误') })
+  await assert.rejects(service.signInWithCode('13800000000', '000000', 'k'), error => error.kind === 'credentials' && error.message === '验证码错误')
+  assert.equal(vault.credentials(), null)
+  assert.equal(vault.session(), null)
+  server.requests.length = 0
+  assert.equal((await service.loadWidgetModel('')).state, 'signedOut')
+  assert.equal(server.requests.length, 0)
+})
+
+test('只用验证码登录过：到期后小组件不联网、不发短信，一直提示重新登录', async () => {
+  const { service, server, clock } = setup()
+  await signInByCode(service)
+  await service.loadWidgetModel('')
+  server.requests.length = 0
+  clock.t += 16 * 24 * HOUR
+  for (let i = 0; i < 10; i++) {
+    const model = await service.loadWidgetModel('')
+    assert.equal(model.state, 'ok', '已有的数据继续显示')
+    assert.equal(model.view.notice, '登录已过期，需要重新登录')
+    clock.t += 6 * HOUR
+  }
+  assert.equal(server.requests.length, 0)
+  assert.equal(service.state().block, null, '不算账号被拒，闸门不关')
+  assert.equal(service.state().sessionExpiresAt, null)
+})
+
+test('只用验证码登录过且没有数据时，到期后也有明确提示', async () => {
+  const { service, server, clock } = setup()
+  await signInByCode(service)
+  server.requests.length = 0
+  clock.t += 16 * 24 * HOUR
+  const model = await service.loadWidgetModel('')
+  assert.equal(model.state, 'error')
+  assert.equal(model.message, '登录已过期，需要重新登录')
+  assert.equal(server.requests.length, 0)
+})
+
+test('只用验证码登录过：到期后连续刷新也不会说“稍后自动重试”，等用户登录前不需要频繁刷新', async () => {
+  const { service, clock } = setup()
+  await signInByCode(service)
+  clock.t += 16 * 24 * HOUR
+  for (let i = 0; i < 3; i++) {
+    const model = await service.loadWidgetModel('')
+    assert.equal(model.message, '登录已过期，需要重新登录')
+    assert.equal(model.nextRefresh.getTime(), clock.t + loadSettings().refreshHours * HOUR)
+    clock.t += MINUTE
+  }
+})
+
+test('只用验证码登录过：会话被提前作废时清掉会话，不再联网', async () => {
+  const { service, server, clock } = setup({ daily: () => fail('-200') })
+  await signInByCode(service)
+  server.requests.length = 0
+  const model = await service.loadWidgetModel('')
+  assert.equal(model.state, 'error')
+  assert.equal(model.message, '登录已过期，需要重新登录')
+  assert.equal(server.count('daily'), 1, '只查了发现作废的那一次')
+  assert.equal(server.count('login') + server.count('smsLogin') + server.count('sms'), 0)
+  assert.equal(service.state().sessionExpiresAt, null)
+  server.requests.length = 0
+  clock.t += 2 * HOUR
+  await service.loadWidgetModel('')
+  assert.equal(server.requests.length, 0)
+})
+
+test('只用验证码登录过：手动刷新和诊断在到期后也不联网', async () => {
+  const { service, server, clock } = setup()
+  await signInByCode(service)
+  server.requests.length = 0
+  clock.t += 16 * 24 * HOUR
+  const expired = error => error.kind === 'session' && error.code === 'no-password'
+  await assert.rejects(service.refreshNow(), expired)
+  await assert.rejects(service.diagnoseDaily(), expired)
+  assert.equal(server.requests.length, 0)
+  assert.equal(service.state().block, null)
+})
+
+test('到期后再用验证码登录一次就恢复', async () => {
+  const { service, clock } = setup()
+  await signInByCode(service)
+  await service.loadWidgetModel('')
+  clock.t += 16 * 24 * HOUR
+  assert.equal((await service.loadWidgetModel('')).view.notice, '登录已过期，需要重新登录')
+  await signInByCode(service)
+  const model = await service.loadWidgetModel('')
+  assert.equal(model.state, 'ok')
+  assert.equal(model.view.notice, null)
+  assert.equal(vault.snapshot('acct-1').fetchedAt, clock.t, '同一个账号的数据保留，并刷新到最新')
+})
+
+test('用密码登录过的号改用验证码登录：密码 MD5 留着，到期还能自动续', async () => {
+  const { service, server, clock } = await signedIn()
+  const state = await signInByCode(service)
+  assert.equal(state.canAutoLogin, true)
+  assert.equal(vault.credentials().passwordMd5, md5Hex(PASSWORD))
+  server.requests.length = 0
+  clock.t += 16 * 24 * HOUR
+  assert.equal((await service.loadWidgetModel('')).state, 'ok')
+  assert.equal(server.count('login'), 1)
+  assert.equal(server.count('sms') + server.count('smsLogin'), 0)
+})
+
+test('换手机号用验证码登录：不带上旧号的密码，旧号的数据清掉', async () => {
+  const { service } = await signedIn()
+  await service.loadWidgetModel('')
+  assert.ok(vault.snapshot('acct-1'))
+  const state = await signInByCode(service, '13900000000')
+  assert.deepEqual(vault.credentials(), { phone: '13900000000', passwordMd5: null })
+  assert.equal(state.canAutoLogin, false)
+  assert.equal(vault.snapshot('acct-1'), null)
+})
+
+test('密码被国网拒绝后改用验证码登录：闸门打开，被拒的密码不留着', async () => {
+  const defaults = createMockServer().handlers
+  let rejected = false
+  const { service, server, clock } = await signedIn({ login: () => (rejected ? fail('1001', '密码错误') : defaults.login()) })
+  rejected = true
+  clock.t += 16 * 24 * HOUR
+  await service.loadWidgetModel('')
+  assert.equal(service.state().block.kind, 'credentials')
+  const state = await signInByCode(service)
+  assert.equal(state.block, null)
+  assert.equal(state.canAutoLogin, false)
+  assert.equal(vault.credentials().passwordMd5, null)
+  server.requests.length = 0
+  clock.t += 16 * 24 * HOUR
+  await service.loadWidgetModel('')
+  assert.equal(server.count('login'), 0, '到期后不能再拿被拒的密码去试')
+})
+
+test('风控闸门关着时验证码登录成功：闸门打开，小组件恢复，密码留着', async () => {
+  const defaults = createMockServer().handlers
+  let blocked = true
+  const { service } = await signedIn({ daily: payload => (blocked ? fail('RK008') : defaults.daily(payload)) })
+  await service.loadWidgetModel('')
+  assert.equal(service.state().block.kind, 'risk')
+  blocked = false
+  const state = await signInByCode(service)
+  assert.equal(state.block, null)
+  assert.equal(state.canAutoLogin, true)
+  const model = await service.loadWidgetModel('')
+  assert.equal(model.state, 'ok')
+  assert.equal(model.view.notice, null)
+})
+
+test('验证码登录被风控拦下：现有登录、设备身份和闸门都不变', async () => {
+  const { service, server } = await signedIn({ smsLogin: () => fail('RK008', '网络连接超时 (RK008),请重试!') })
+  const session = vault.session()
+  const seed = vault.device('13800000000').seedHex
+  await assert.rejects(signInByCode(service), error => error.kind === 'risk' && error.code === 'RK008')
+  assert.deepEqual(vault.session(), session)
+  assert.equal(vault.device('13800000000').seedHex, seed)
+  assert.equal(vault.credentials().passwordMd5, md5Hex(PASSWORD))
+  assert.equal(service.state().block, null, '现有登录还能用，不用停掉小组件')
+  assert.equal(server.count('smsLogin'), 1)
+})
+
+test('全新安装时发码或验证码登录被风控拦下：不保存账号，再试还是同一个设备身份', async () => {
+  const blockedSend = setup({ sms: () => fail('RK008') })
+  await assert.rejects(blockedSend.service.requestLoginCode('13800000000'), error => error.kind === 'risk')
+  assert.equal(vault.credentials(), null)
+
+  const { service, server } = setup({ smsLogin: () => fail('RK008') })
+  for (let i = 0; i < 2; i++) await assert.rejects(signInByCode(service), error => error.kind === 'risk')
+  assert.equal(vault.credentials(), null)
+  assert.equal(service.state().signedIn, false)
+  assert.equal(new Set(server.requests.map(r => r.headers.AppGuid)).size, 1)
+})
+
+test('密码登录和验证码登录用同一个设备身份，切换不会变成新设备', async () => {
+  const { service, server } = setup()
+  await service.signIn('13800000000', PASSWORD)
+  await signInByCode(service)
+  await service.signIn('13800000000', PASSWORD)
+  assert.equal(new Set(server.requests.map(r => r.headers.AppGuid)).size, 1)
+})
+
 test('小组件：缓存有效时不联网', async () => {
   const { service, server, clock } = await signedIn()
   assert.equal((await service.loadWidgetModel('')).state, 'ok')

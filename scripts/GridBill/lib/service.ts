@@ -6,6 +6,7 @@
  *   2. 自动登录最多 12 小时一次；同一户号的查询最多 30 分钟一次。
  *   3. 绝不自动发短信。
  *   4. 密码验证通过之后才保存，输错的密码不会被小组件反复拿去试。
+ *   5. 验证码登录不保存密码。没有保存过密码的账号到期后，小组件不联网，只提示重新登录。
  */
 import { md5Hex } from './protocol/bytes'
 import { APP_KEYS, chinaTime, SgccClient, SgccError, type Transport } from './protocol/client'
@@ -25,6 +26,7 @@ const SESSION_MARGIN = 5 * MINUTE
 const RETRY_AFTER_FAILURE = HOUR
 /** 小组件一次运行里花在联网上的总时间。官方文档没写上限，只说扩展进程随时可能被结束。 */
 const WIDGET_NETWORK_BUDGET = 25 * 1000
+const LOGIN_EXPIRED = '登录已过期，需要重新登录'
 
 type Attempt<T> = { ok: true; value: T } | { ok: false }
 
@@ -37,6 +39,8 @@ export type LoginState = {
   phone: string
   accounts: Account[]
   signedIn: boolean
+  /** 保存了密码 MD5，登录到期后可以自动续。 */
+  canAutoLogin: boolean
   sessionExpiresAt: number | null
   block: Block | null
 }
@@ -124,6 +128,8 @@ export function createService(
   async function login(mode: 'background' | 'interactive'): Promise<Session> {
     const credentials = vault.credentials()
     if (!credentials) throw new SgccError('credentials', 'no-credentials', '请先登录')
+    // 没有保存密码就没法自动续。短信必须由用户发起，所以这里不联网，只提示。
+    if (!credentials.passwordMd5) throw new SgccError('session', 'no-password', LOGIN_EXPIRED)
     if (mode === 'background') {
       const gate = vault.gate()
       if (now() - gate.lastAutoLoginAt < MIN_AUTO_LOGIN_INTERVAL) {
@@ -266,9 +272,24 @@ export function createService(
       phone: credentials?.phone ?? '',
       accounts: vault.accounts(),
       signedIn: !!credentials,
+      canAutoLogin: !!credentials?.passwordMd5,
       sessionExpiresAt: session?.expiresAt ?? null,
       block: vault.gate().block,
     }
+  }
+
+  /** 用户手动登录成功后保存结果，并打开闸门。 */
+  function saveSignIn(phone: string, passwordMd5: string | null, session: Session, accounts: Account[]): void {
+    const previous = vault.credentials()
+    if (previous && previous.phone !== phone) {
+      // 换了账号：旧账号的用电数据不再保留。
+      for (const account of vault.accounts()) vault.removeSnapshot(account.id)
+    }
+    vault.saveCredentials({ phone, passwordMd5 })
+    vault.saveSession(session)
+    vault.saveAccounts(accounts)
+    vault.saveGate({ block: null, lastAutoLoginAt: 0 })
+    for (const account of accounts) vault.saveLastAttempt(account.id, 0)
   }
 
   return {
@@ -281,22 +302,31 @@ export function createService(
       if (sms && !/^\d{6}$/.test(sms.code)) throw new SgccError('business', 'bad-code', '验证码应该是 6 位数字')
       const passwordMd5 = md5Hex(password)
       const { session, accounts } = await clientFor(phone).login(passwordMd5, sms)
+      saveSignIn(phone, passwordMd5, session, accounts)
+      return state()
+    },
+
+    /** 用户在界面上发起的验证码登录。这条路径不碰密码，同一手机号之前验证过的密码 MD5 继续留着，到期还能自动续。 */
+    async signInWithCode(phone: string, code: string, codeKey: string): Promise<LoginState> {
+      if (!phone) throw new SgccError('credentials', 'empty', '请填写手机号')
+      if (!/^\d{6}$/.test(code)) throw new SgccError('business', 'bad-code', '验证码应该是 6 位数字')
+      if (!codeKey) throw new SgccError('business', 'no-code-key', '请先发送验证码')
+      const { session, accounts } = await clientFor(phone).smsLogin(code, codeKey)
       const previous = vault.credentials()
-      if (previous && previous.phone !== phone) {
-        // 换了账号：旧账号的用电数据不再保留。
-        for (const account of vault.accounts()) vault.removeSnapshot(account.id)
-      }
-      vault.saveCredentials({ phone, passwordMd5 })
-      vault.saveSession(session)
-      vault.saveAccounts(accounts)
-      vault.saveGate({ block: null, lastAutoLoginAt: 0 })
-      for (const account of accounts) vault.saveLastAttempt(account.id, 0)
+      // 刚被国网拒绝的密码不能留着，否则到期后小组件又会拿它去试。
+      const passwordMd5 = previous?.phone === phone && vault.gate().block?.kind !== 'credentials' ? previous.passwordMd5 : null
+      saveSignIn(phone, passwordMd5, session, accounts)
       return state()
     },
 
     /** 只能由用户点按钮触发，返回一次性 codeKey，不落地。 */
     requestVerificationCode(phone: string): Promise<string> {
       return clientFor(phone).sendDeviceSms()
+    },
+
+    /** 只能由用户点按钮触发，返回一次性 codeKey，不落地。 */
+    requestLoginCode(phone: string): Promise<string> {
+      return clientFor(phone).sendLoginSms()
     },
 
     /** 用户点“立即刷新”。不受后台频率限制，但被闸门拦下时要先重新登录。 */
@@ -399,6 +429,8 @@ export function createService(
         return render(block ? blockMessage(block) : null, nextNormal)
       }
       if (block) return render(blockMessage(block), nextNormal)
+      // 没有保存密码就不可能自己恢复，不能显示“稍后自动重试”。
+      if (!validSession() && !vault.credentials()?.passwordMd5) return render(LOGIN_EXPIRED, nextNormal)
       if (t - vault.lastAttempt(account.id) < MIN_QUERY_INTERVAL) return render(cached ? null : '稍后自动重试', nextRetry)
 
       vault.saveLastAttempt(account.id, t)

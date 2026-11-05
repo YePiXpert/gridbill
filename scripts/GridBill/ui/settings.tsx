@@ -10,13 +10,15 @@ import { accountDisplayName, formatKwh } from '../lib/view-model'
 const service = createService(scriptingTransport)
 const SMS_COOLDOWN_MS = 60 * 1000
 
+type LoginMode = 'password' | 'code'
+
 export function describeError(error: unknown): string {
   if (error instanceof SgccError) {
     switch (error.kind) {
       case 'network':
         return `${error.message}，请检查网络后重试。`
       case 'device':
-        return '国网要求验证新设备。点“发送验证码”，收到短信后填入再登录。'
+        return '国网要求验证新设备。填好密码后点“发送验证码”，收到短信后填入再登录。'
       case 'risk':
         return `国网的安全校验拦下了这次请求${/^RK/.test(error.code) ? `（${error.code}）` : ''}。国网的提示常写成“网络连接超时，请重试”，但多半不是网络问题，不要反复重试。建议先确认官方 App 能正常使用，过几个小时再试一次。短信不一定能解决。`
       default:
@@ -84,6 +86,7 @@ export function SettingsPage({ initial }: { initial: InitialState }) {
   const [fetchedAt, setFetchedAt] = useState(initial.fetchedAt)
   const [phone, setPhone] = useState(initial.login.phone)
   const [password, setPassword] = useState('')
+  const [mode, setMode] = useState<LoginMode>(initial.login.signedIn && !initial.login.canAutoLogin ? 'code' : 'password')
   const [needsSms, setNeedsSms] = useState(false)
   const [codeKey, setCodeKey] = useState('')
   const [code, setCode] = useState('')
@@ -94,7 +97,12 @@ export function SettingsPage({ initial }: { initial: InitialState }) {
   const [report, setReport] = useState('')
 
   const selectedAccount = login.accounts.find(a => a.id === settings.accountId) ?? login.accounts[0] ?? null
-  const showForm = !login.signedIn || !!login.block || wantsRelogin
+  // 没有保存密码时登录到期不能自动续，要用户自己再登录一次。
+  const needsManualLogin = login.signedIn && !login.canAutoLogin && !login.sessionExpiresAt
+  const showForm = !login.signedIn || !!login.block || wantsRelogin || needsManualLogin
+  const canQuery = login.signedIn && !login.block && !needsManualLogin
+  const usesCode = mode === 'code' || needsSms
+  const canSubmit = !!phone.trim() && (mode === 'code' ? !!codeKey && !!code.trim() : !!password)
 
   const update = (patch: Partial<Settings>) => {
     const next = { ...settings, ...patch }
@@ -113,7 +121,15 @@ export function SettingsPage({ initial }: { initial: InitialState }) {
     try {
       await work()
     } catch (error) {
-      if (error instanceof SgccError && error.kind === 'device') setNeedsSms(true)
+      if (error instanceof SgccError && error.kind === 'device') {
+        setNeedsSms(true)
+        // 新设备验证只能配合密码登录，手上的验证码也是另一种类型的，不能接着用。
+        if (mode === 'code') {
+          setMode('password')
+          setCode('')
+          setCodeKey('')
+        }
+      }
       setLogin(service.state())
       setMessage(describeError(error))
     } finally {
@@ -121,14 +137,33 @@ export function SettingsPage({ initial }: { initial: InitialState }) {
     }
   }
 
+  const switchMode = (next: LoginMode) => {
+    if (next === mode) return
+    setMode(next)
+    setNeedsSms(false)
+    setCode('')
+    setCodeKey('')
+    setMessage('')
+  }
+
+  /** 验证码是发给某个手机号的，改了号码就不能再用。 */
+  const changePhone = (text: string) => {
+    setPhone(text)
+    setCode('')
+    setCodeKey('')
+  }
+
   const signIn = () =>
     guarded(async () => {
       const typed = code.trim()
-      if (needsSms && (!codeKey || !typed)) {
+      if (usesCode && (!codeKey || !typed)) {
         setMessage('请先发送并填写短信验证码。')
         return
       }
-      const next = await service.signIn(phone.trim(), password, needsSms ? { code: typed, codeKey } : undefined)
+      const next =
+        mode === 'code'
+          ? await service.signInWithCode(phone.trim(), typed, codeKey)
+          : await service.signIn(phone.trim(), password, needsSms ? { code: typed, codeKey } : undefined)
       setLogin(next)
       setPassword('')
       setCode('')
@@ -158,7 +193,7 @@ export function SettingsPage({ initial }: { initial: InitialState }) {
     if (login.sessionExpiresAt) {
       const confirmed = await Dialog.confirm({
         title: '确定要重新登录吗？',
-        message: '当前登录还有效，到期后会自动续，通常不需要重新登录。短时间内多次登录可能被国网的安全校验拦下。',
+        message: `当前登录还有效，${login.canAutoLogin ? '到期后会自动续，' : ''}通常不需要重新登录。短时间内多次登录可能被国网的安全校验拦下。`,
         cancelLabel: '取消',
         confirmLabel: '继续',
       })
@@ -171,6 +206,8 @@ export function SettingsPage({ initial }: { initial: InitialState }) {
     setWantsRelogin(false)
     setPhone(login.phone)
     setPassword('')
+    setCode('')
+    setCodeKey('')
     setNeedsSms(false)
     setMessage('')
   }
@@ -182,7 +219,7 @@ export function SettingsPage({ initial }: { initial: InitialState }) {
         setMessage(`请 ${Math.ceil(wait / 1000)} 秒后再发送。`)
         return
       }
-      setCodeKey(await service.requestVerificationCode(phone.trim()))
+      setCodeKey(await (mode === 'code' ? service.requestLoginCode(phone.trim()) : service.requestVerificationCode(phone.trim())))
       setSmsSentAt(Date.now())
       setMessage('验证码已发送，请查收短信。')
     })
@@ -223,6 +260,9 @@ export function SettingsPage({ initial }: { initial: InitialState }) {
     setPriceText(priceTexts(defaults))
     setPhone('')
     setPassword('')
+    setMode('password')
+    setCode('')
+    setCodeKey('')
     setNeedsSms(false)
     setFetchedAt(0)
     setMessage('已清除。')
@@ -257,20 +297,27 @@ export function SettingsPage({ initial }: { initial: InitialState }) {
       <List navigationTitle="国网电费" navigationBarTitleDisplayMode="inline" toolbar={{ cancellationAction: <Button title="完成" action={dismiss} /> }}>
         <Section
           header={<Text>账号</Text>}
-          footer={<Text>只在这台手机上直连国网，不经过其他服务器。不保存明文密码；用来自动续登录的密码 MD5 存在本脚本的钥匙串里，不同步 iCloud。登录到期后会自动续，只有国网要求短信验证或密码变了才需要你处理。</Text>}
+          footer={<Text>只在这台手机上直连国网，不经过其他服务器。不保存明文密码；用来自动续登录的密码 MD5 存在本脚本的钥匙串里，不同步 iCloud。用密码登录时，到期后会自动续，只有国网要求短信验证或密码变了才需要你处理。只用验证码登录时不保存密码，到期后要再登录一次。</Text>}
         >
           {login.signedIn ? <LabeledContent title="账号" value={maskTail(login.phone)} /> : null}
           {login.signedIn && login.sessionExpiresAt ? <LabeledContent title="本次登录到期" value={formatTime(login.sessionExpiresAt)} /> : null}
           {login.block ? <Text foregroundStyle="systemOrange">已暂停自动更新：{login.block.message}。处理好之前小组件不会再联网。</Text> : null}
-          {showForm ? <Field title="手机号" prompt="网上国网登录手机号" value={phone} onChanged={setPhone} keyboardType="phonePad" disabled={busy} /> : null}
+          {needsManualLogin && !login.block ? <Text foregroundStyle="systemOrange">登录已过期。没有保存密码，需要再登录一次，登录前小组件不会联网。</Text> : null}
           {showForm ? (
+            <Picker title="登录方式" value={mode} onChanged={switchMode} pickerStyle="segmented" disabled={busy}>
+              <Text tag="password">密码登录</Text>
+              <Text tag="code">验证码登录</Text>
+            </Picker>
+          ) : null}
+          {showForm ? <Field title="手机号" prompt="网上国网登录手机号" value={phone} onChanged={changePhone} keyboardType="phonePad" disabled={busy} /> : null}
+          {showForm && mode === 'password' ? (
             <LabeledContent title="密码">
               <SecureField title="密码" prompt="登录密码" value={password} onChanged={setPassword} disabled={busy} multilineTextAlignment="trailing" />
             </LabeledContent>
           ) : null}
-          {showForm && needsSms ? <Button title="发送验证码" action={sendCode} disabled={busy || !phone.trim()} /> : null}
-          {showForm && needsSms ? <Field title="短信验证码" prompt="6 位数字" value={code} onChanged={setCode} keyboardType="numberPad" textContentType="oneTimeCode" disabled={busy} /> : null}
-          {showForm ? <Button title={busy ? '处理中…' : needsSms ? '验证并登录' : '登录'} action={signIn} disabled={busy || !phone.trim() || !password} /> : null}
+          {showForm && usesCode ? <Button title="发送验证码" action={sendCode} disabled={busy || !phone.trim()} /> : null}
+          {showForm && usesCode ? <Field title="短信验证码" prompt="6 位数字" value={code} onChanged={setCode} keyboardType="numberPad" textContentType="oneTimeCode" disabled={busy} /> : null}
+          {showForm ? <Button title={busy ? '处理中…' : needsSms ? '验证并登录' : '登录'} action={signIn} disabled={busy || !canSubmit} /> : null}
           {wantsRelogin && !login.block ? <Button title="取消" action={cancelRelogin} disabled={busy} /> : null}
           {login.signedIn && !showForm ? <Button title="重新登录" action={startRelogin} /> : null}
           {message ? (
@@ -329,8 +376,8 @@ export function SettingsPage({ initial }: { initial: InitialState }) {
 
         <Section header={<Text>数据</Text>} footer={<Text>“诊断每日数据”会多查三次国网，只显示条数、日期、读数和字段名，不含账号和户号，可以截图发给别人看。</Text>}>
           {fetchedAt > 0 ? <LabeledContent title="上次更新" value={formatTime(fetchedAt)} /> : null}
-          <Button title={busy ? '处理中…' : '立即刷新'} action={refresh} disabled={busy || !login.signedIn || !!login.block} />
-          <Button title="诊断每日数据" action={diagnose} disabled={busy || !login.signedIn || !!login.block} />
+          <Button title={busy ? '处理中…' : '立即刷新'} action={refresh} disabled={busy || !canQuery} />
+          <Button title="诊断每日数据" action={diagnose} disabled={busy || !canQuery} />
           {report ? <Text font="caption">{report}</Text> : null}
           <LabeledContent title="脚本版本" value={Script.metadata.version ?? '未知'} />
           <LabeledContent title="远程来源" value={Script.metadata.remoteResource?.url ? '已设置' : '未设置'} />

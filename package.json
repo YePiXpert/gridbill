@@ -5,7 +5,7 @@
   "scripts": {
     "typecheck": "tsc -p tsconfig.json",
     "build": "tsc -p tsconfig.build.json",
-    "test": "npm run build && node --test tests/",
+    "test": "npm run build && node --test",
     "preview": "npm run build && node tools/preview.cjs"
   },
   "devDependencies": {

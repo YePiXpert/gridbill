@@ -7,13 +7,14 @@
  *   用电数据也放这里：写入是同步的（小组件调用 present 后上下文立即销毁），也不进共享目录。
  * Storage：只放显示设置。官方文档：默认是脚本私有域。
  *
- * 明文密码不落地，只保存协议实际需要的 MD5。
+ * 明文密码不落地，只保存协议实际需要的 MD5。只用验证码登录过的账号没有密码可存。
  */
 import type { Account, Session, Settings, Snapshot } from './types'
 import { DEFAULT_SETTINGS } from './types'
 import type { DeviceState } from './protocol/turing'
 
-export type Credentials = { phone: string; passwordMd5: string }
+/** passwordMd5 为 null 表示没有保存密码，登录到期后只能由用户重新登录。 */
+export type Credentials = { phone: string; passwordMd5: string | null }
 
 /** 为什么后台必须停下来等用户处理。 */
 export type Block = { kind: 'credentials' | 'device' | 'risk'; message: string; at: number }
