@@ -5,12 +5,12 @@ const assert = require('node:assert/strict')
 const { fake, expand, texts, findAll } = require('./support/fake-ui.cjs')
 const { resetStores } = require('./support/shim.cjs')
 
-const { DetailPage, loadDetailState } = require('../.build/GridBill/ui/detail')
-const { SettingsPage } = require('../.build/GridBill/ui/settings')
-const { ACCENT, ACCENT_SOFT } = require('../.build/GridBill/ui/widget-views')
-const { SgccClient, SgccError } = require('../.build/GridBill/lib/protocol/client')
-const { demoSnapshot } = require('../.build/GridBill/lib/view-model')
-const { saveSettings, vault } = require('../.build/GridBill/lib/vault')
+const { DetailPage, loadDetailState } = require('../../.build/GridBill/ui/detail')
+const { SettingsPage } = require('../../.build/GridBill/ui/settings')
+const { ACCENT, ACCENT_SOFT } = require('../../.build/GridBill/ui/widget-views')
+const { SgccClient, SgccError } = require('../../.build/GridBill/lib/protocol/client')
+const { demoSnapshot } = require('../../.build/GridBill/lib/view-model')
+const { saveSettings, vault } = require('../../.build/GridBill/lib/vault')
 
 const NOW = Date.now()
 const PHONE = '13812345678'
@@ -94,7 +94,7 @@ test('打开脚本先显示详情页，关掉后刷新小组件并退出', async
   fake.Widget.reloadAll = () => order.push('reload')
   fake.Script.exit = () => order.push('exit')
   try {
-    require('../.build/GridBill/index')
+    require('../../.build/GridBill/index')
     await new Promise(resolve => setImmediate(resolve))
     assert.equal(spy.shown[0].type, DetailPage)
     assert.deepEqual(order, ['present', 'reload', 'exit'])

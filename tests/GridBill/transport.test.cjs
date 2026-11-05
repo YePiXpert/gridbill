@@ -18,7 +18,7 @@ Module._load = function (request, parent, isMain) {
   }
   return originalLoad.call(this, request, parent, isMain)
 }
-const { scriptingTransport } = require('../.build/GridBill/lib/transport')
+const { scriptingTransport } = require('../../.build/GridBill/lib/transport')
 Module._load = originalLoad
 
 const request = { headers: { a: 'b' }, body: 'x', timeoutSeconds: 20 }

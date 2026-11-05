@@ -6,12 +6,12 @@ const assert = require('node:assert/strict')
 const { fake, expand, texts, findAll } = require('./support/fake-ui.cjs')
 const { resetStores } = require('./support/shim.cjs')
 
-const { WidgetRoot, amountFontSize } = require('../.build/GridBill/ui/widget-views')
-const { SettingsPage, describeError, loadInitialState } = require('../.build/GridBill/ui/settings')
-const { SgccClient, SgccError } = require('../.build/GridBill/lib/protocol/client')
-const { buildBillView, demoSnapshot } = require('../.build/GridBill/lib/view-model')
-const { DEFAULT_SETTINGS } = require('../.build/GridBill/lib/types')
-const { loadSettings, vault } = require('../.build/GridBill/lib/vault')
+const { WidgetRoot, amountFontSize } = require('../../.build/GridBill/ui/widget-views')
+const { SettingsPage, describeError, loadInitialState } = require('../../.build/GridBill/ui/settings')
+const { SgccClient, SgccError } = require('../../.build/GridBill/lib/protocol/client')
+const { buildBillView, demoSnapshot } = require('../../.build/GridBill/lib/view-model')
+const { DEFAULT_SETTINGS } = require('../../.build/GridBill/lib/types')
+const { loadSettings, vault } = require('../../.build/GridBill/lib/vault')
 
 const ACCOUNT = { id: 'a', name: '张*', consNo: '', consNoSrc: '1100001234', provinceCode: '', orgNo: '', elecType: '01' }
 const NOW = Date.UTC(2026, 10, 4)

@@ -45,5 +45,5 @@ module.exports = {
     keychain.clear()
     storage.clear()
   },
-  lib: path => require(`../../.build/GridBill/lib/${path}`),
+  lib: path => require(`../../../.build/GridBill/lib/${path}`),
 }

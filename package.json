@@ -1,12 +1,12 @@
 {
-  "name": "gridbill-workspace",
+  "name": "scripting-scripts",
   "private": true,
-  "description": "桌面端工具：类型检查和离线测试。脚本本身在 scripts/GridBill，不依赖这里的任何东西。",
+  "description": "桌面端工具：类型检查和离线测试。脚本本身在 scripts/ 下，不依赖这里的任何东西。",
   "scripts": {
     "typecheck": "tsc -p tsconfig.json",
     "build": "tsc -p tsconfig.build.json",
     "test": "npm run build && node --test",
-    "preview": "npm run build && node tools/preview.cjs"
+    "preview": "npm run build && node tools/GridBill/preview.cjs"
   },
   "devDependencies": {
     "typescript": "^7.0.2"

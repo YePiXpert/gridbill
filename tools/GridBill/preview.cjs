@@ -6,11 +6,11 @@
  */
 const fs = require('node:fs')
 const path = require('node:path')
-const { fake, expand } = require('../tests/support/fake-ui.cjs')
+const { fake, expand } = require('../../tests/GridBill/support/fake-ui.cjs')
 
-const { WidgetRoot } = require('../.build/GridBill/ui/widget-views')
-const { buildBillView, demoSnapshot } = require('../.build/GridBill/lib/view-model')
-const { DEFAULT_SETTINGS } = require('../.build/GridBill/lib/types')
+const { WidgetRoot } = require('../../.build/GridBill/ui/widget-views')
+const { buildBillView, demoSnapshot } = require('../../.build/GridBill/lib/view-model')
+const { DEFAULT_SETTINGS } = require('../../.build/GridBill/lib/types')
 
 const NOW = Date.UTC(2026, 10, 4, 0, 30)
 const ACCOUNT = { id: 'a', name: '我家', consNo: '', consNoSrc: '', provinceCode: '', orgNo: '', elecType: '01' }
@@ -155,6 +155,6 @@ h1{font-size:18px;color:#fff;margin:0 0 4px}p{color:#eee;font-size:13px;margin:0
 .widget>*{height:100%;width:100%}
 </style></head><body><h1>GridBill 小组件布局预览（演示数据）</h1><p>这是在电脑上的近似渲染，用来看布局有没有溢出。图标是占位符，字体和间距和 iOS 有差别，最终效果以手机为准。</p>${body}</body></html>`
 
-const out = path.join(__dirname, '..', 'preview.html')
+const out = path.join(__dirname, '..', '..', 'preview.html')
 fs.writeFileSync(out, html)
 console.log(`已生成 ${out}`)
