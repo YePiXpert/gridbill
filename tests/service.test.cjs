@@ -422,6 +422,146 @@ test('更新前存下的快照只剩 4 天读数和一堆占位行：下一次�
   assert.equal(vault.snapshot('acct-1').daily.length, 31)
 })
 
+/** 今年有 1–10 月的账单，去年是全年。 */
+function billsByYear(payload) {
+  const { year } = payload.data
+  const months = year === 2026 ? 10 : 12
+  const list = Array.from({ length: months }, (_, i) => ({ month: `${year}${String(i + 1).padStart(2, '0')}`, monthPq: '100', monthAmt: '50' }))
+  return ok({ yearPq: String(months * 100), yearAmt: String(months * 50), list })
+}
+const monthlyYears = server => server.requests.filter(r => r.route === 'monthly').map(r => r.payload.data.year)
+const withBills = { daily: everyDayInRange('2026-11-03'), monthly: billsByYear }
+const FOR_DETAIL = { includeHistory: true }
+
+test('账单：后台刷新只保存今年的，不为详情页多查去年', async () => {
+  const { service, server } = await signedIn(withBills)
+  await service.loadWidgetModel('')
+  assert.deepEqual(monthlyYears(server), [2026])
+  const { bills } = vault.snapshot('acct-1')
+  assert.deepEqual(bills.map(b => b.month), Array.from({ length: 10 }, (_, i) => `2026-${String(i + 1).padStart(2, '0')}`))
+  assert.equal(bills[9].kwh, 100)
+  assert.equal(bills[9].yuan, 50)
+})
+
+test('账单：设置页和登录后的刷新也不多查去年', async () => {
+  const { service, server } = await signedIn(withBills)
+  await service.refreshNow('acct-1')
+  assert.deepEqual(monthlyYears(server), [2026])
+})
+
+test('账单：详情页刷新补上去年的，只留最近 12 个月，查到过就不再查', async () => {
+  const { service, server } = await signedIn(withBills)
+  await service.refreshNow('acct-1', FOR_DETAIL)
+  assert.deepEqual(monthlyYears(server), [2026, 2025])
+  const months = vault.snapshot('acct-1').bills.map(b => b.month)
+  assert.equal(months.length, 12)
+  assert.equal(months[0], '2025-11')
+  assert.equal(months[11], '2026-10')
+  assert.deepEqual([...months].sort(), months, '时间升序')
+  assert.equal(vault.snapshot('acct-1').lastBill.month, '2026-10', '上期账单还是今年最新的')
+
+  server.requests.length = 0
+  await service.refreshNow('acct-1', FOR_DETAIL)
+  assert.deepEqual(monthlyYears(server), [2026], '去年的不再查')
+  assert.equal(vault.snapshot('acct-1').bills.length, 12)
+})
+
+test('账单：后台先存了今年的，详情页再补去年的，顺序和范围都对', async () => {
+  const { service, server } = await signedIn(withBills)
+  await service.loadWidgetModel('')
+  server.requests.length = 0
+  await service.refreshNow('acct-1', FOR_DETAIL)
+  assert.deepEqual(monthlyYears(server), [2026, 2025])
+  const months = vault.snapshot('acct-1').bills.map(b => b.month)
+  assert.equal(months.length, 12)
+  assert.equal(months[0], '2025-11', '留下的是最近 12 个月，不是先存进来的那些')
+  assert.equal(months[11], '2026-10')
+  assert.deepEqual([...months].sort(), months)
+})
+
+test('账单：后台刷新不会弄丢详情页查到的去年账单', async () => {
+  const { service, clock } = await signedIn(withBills)
+  await service.refreshNow('acct-1', FOR_DETAIL)
+  clock.t += 13 * HOUR
+  await service.loadWidgetModel('')
+  assert.equal(vault.snapshot('acct-1').bills[0].month, '2025-11')
+})
+
+test('账单：查去年失败不影响这次更新，下次再试，网络错误也一样', async () => {
+  for (const failure of [() => fail('9999', '不支持'), () => { throw new Error('offline') }]) {
+    const { service, server } = await signedIn({ daily: everyDayInRange('2026-11-03'), monthly: payload => (payload.data.year === 2025 ? failure() : billsByYear(payload)) })
+    const snapshot = await service.refreshNow('acct-1', FOR_DETAIL)
+    assert.equal(snapshot.bills.length, 10)
+    assert.ok(snapshot.balance, '后面的余额查询不能被耽误')
+    assert.equal(service.state().block, null)
+    server.handlers.monthly = billsByYear
+    assert.equal((await service.refreshNow('acct-1', FOR_DETAIL)).bills.length, 12)
+  }
+})
+
+test('账单：查去年时被风控拦下要停下来，不能吞掉', async () => {
+  const { service } = await signedIn({ daily: everyDayInRange('2026-11-03'), monthly: payload => (payload.data.year === 2025 ? fail('RK008') : billsByYear(payload)) })
+  await assert.rejects(service.refreshNow('acct-1', FOR_DETAIL), error => error.kind === 'risk')
+  assert.equal(service.state().block.kind, 'risk')
+})
+
+test('账单：今年的查询失败时，已保存的账单不丢', async () => {
+  const { service, server } = await signedIn(withBills)
+  await service.refreshNow('acct-1', FOR_DETAIL)
+  server.handlers.monthly = () => fail('9999', '接口错误')
+  server.requests.length = 0
+  await service.refreshNow('acct-1', FOR_DETAIL)
+  assert.deepEqual(monthlyYears(server), [2026], '今年的都查不到，去年的也不用试了')
+  assert.equal(vault.snapshot('acct-1').bills.length, 12)
+  assert.equal(vault.snapshot('acct-1').lastBill.month, '2026-10')
+})
+
+test('账单：一月还没有今年的账单时，查到的去年账单也存下来', async () => {
+  const { service, server, clock } = await signedIn({ daily: everyDayInRange('2027-01-08'), monthly: payload => (payload.data.year === 2027 ? ok({ list: [] }) : billsByYear({ data: { year: 2026 } })) })
+  clock.t = Date.UTC(2027, 0, 10, 2)
+  await service.loadWidgetModel('')
+  assert.deepEqual(monthlyYears(server), [2027, 2026])
+  const snapshot = vault.snapshot('acct-1')
+  assert.equal(snapshot.lastBill.month, '2026-10')
+  assert.equal(snapshot.bills.length, 10)
+})
+
+test('账单：旧版本存下的快照没有账单字段，刷新时正常补上', async () => {
+  const { service, clock } = await signedIn(withBills)
+  await service.loadWidgetModel('')
+  const { bills, ...old } = vault.snapshot('acct-1')
+  assert.ok(bills)
+  vault.saveSnapshot(old)
+  clock.t += 13 * HOUR
+  await service.loadWidgetModel('')
+  assert.equal(vault.snapshot('acct-1').bills.length, 10)
+})
+
+test('读数：详情页要 30 天，不够时才多查上个月；后台够柱状图就不查', async () => {
+  const { service, server, clock } = await signedIn({ daily: everyDayInRange('2026-11-17'), monthly: settledThroughOctober })
+  clock.t = Date.UTC(2026, 10, 18, 2)
+  await service.loadWidgetModel('')
+  assert.deepEqual(dailyRanges(server), ['2026-11-01~2026-11-30'], '本月 17 天，够 14 格柱状图')
+  assert.equal(vault.snapshot('acct-1').daily.length, 17)
+
+  server.requests.length = 0
+  await service.refreshNow('acct-1', FOR_DETAIL)
+  assert.deepEqual(dailyRanges(server), ['2026-11-01~2026-11-30', '2026-10-01~2026-10-31'])
+  assert.equal(vault.snapshot('acct-1').daily.length, 31)
+
+  server.requests.length = 0
+  await service.refreshNow('acct-1', FOR_DETAIL)
+  assert.deepEqual(dailyRanges(server), ['2026-11-01~2026-11-30'], '攒够之后不再多查')
+})
+
+test('详情页刷新：闸门关着时不联网，登录过期也不联网', async () => {
+  const { service, server } = await signedIn(withBills)
+  vault.saveGate({ block: { kind: 'risk', message: 'm', at: 1 }, lastAutoLoginAt: 0 })
+  server.requests.length = 0
+  await assert.rejects(service.refreshNow('acct-1', FOR_DETAIL), error => error.code === 'blocked')
+  assert.equal(server.requests.length, 0)
+})
+
 test('整月查询读数很少时，靠滚动窗口把柱状图补满', async () => {
   const { service, server } = await signedIn({ daily: sparseMonthDaily, monthly: settledThroughOctober })
   const model = await service.loadWidgetModel('')

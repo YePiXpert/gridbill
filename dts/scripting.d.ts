@@ -4,7 +4,9 @@
  */
 type View = (props: Record<string, any>) => any
 
+export declare const BarChart: View
 export declare const Button: View
+export declare const Chart: View
 export declare const HStack: View
 export declare const Image: View
 export declare const LabeledContent: View
@@ -13,6 +15,7 @@ export declare const NavigationStack: View
 export declare const Picker: View
 export declare const ProgressView: View
 export declare const RoundedRectangle: View
+export declare const RuleLineForValueChart: View
 export declare const Section: View
 export declare const SecureField: View
 export declare const Spacer: View

@@ -7,7 +7,7 @@ globalThis.createElement = (type, props, ...children) => ({ type, props: props ?
 globalThis.Fragment = 'Fragment'
 globalThis.Dialog = { confirm: async () => true }
 
-const NAMES = ['Button', 'HStack', 'Image', 'LabeledContent', 'List', 'NavigationStack', 'Picker', 'ProgressView', 'RoundedRectangle', 'Section', 'SecureField', 'Spacer', 'Text', 'TextField', 'VStack']
+const NAMES = ['BarChart', 'Button', 'Chart', 'HStack', 'Image', 'LabeledContent', 'List', 'NavigationStack', 'Picker', 'ProgressView', 'RoundedRectangle', 'RuleLineForValueChart', 'Section', 'SecureField', 'Spacer', 'Text', 'TextField', 'VStack']
 
 function createFakeScripting() {
   const fake = {

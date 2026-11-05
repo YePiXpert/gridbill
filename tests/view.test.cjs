@@ -2,7 +2,7 @@
 const test = require('node:test')
 const assert = require('node:assert/strict')
 const { lib } = require('./support/shim.cjs')
-const { buildBillView, formatKwh, formatYuan, demoSnapshot } = lib('view-model')
+const { buildBillView, buildDetailView, formatKwh, formatYuan, demoSnapshot } = lib('view-model')
 const { DEFAULT_SETTINGS } = lib('types')
 
 const ACCOUNT = { id: 'a', name: '张*', consNo: '', consNoSrc: '', provinceCode: '', orgNo: '', elecType: '01' }
@@ -216,6 +216,76 @@ test('更新时间按北京时间显示', () => {
 test('上期账单标题', () => {
   const v = view({ lastBill: { month: '2026-09', kwh: 305, yuan: 198.25, endDay: null } })
   assert.deepEqual(v.lastBill, { label: '9月账单', yuan: '198.25' })
+})
+
+const detail = (patch = {}, settings = {}) => buildDetailView({ ...base, ...patch }, ACCOUNT, { ...DEFAULT_SETTINGS, ...settings })
+const bill = (month, kwh = 100, yuan = 50) => ({ month, kwh, yuan, endDay: null })
+
+test('详情页：最多 30 天读数，日均和最高只算这 30 天', () => {
+  const v = detail({ daily: readings(31, i => (i === 0 ? 999 : 10)) })
+  assert.equal(v.daily.length, 30)
+  assert.equal(v.daily[0].day, '2026-10-05')
+  assert.equal(v.daily[29].day, '2026-11-03')
+  assert.deepEqual(v.dailyAverage, { kwh: 10, text: '10 度' }, '第一天的 999 已经不在 30 天里')
+  assert.deepEqual(v.dailyPeak, { label: '10/5', kwh: '10 度' })
+  assert.deepEqual(Object.keys(v.daily[0]), ['day', 'kwh'])
+})
+
+test('详情页：最高取真正最高的一天，一样高时取最早的', () => {
+  assert.deepEqual(detail({ daily: readings(5, i => [3, 9, 4, 9, 2][i]) }).dailyPeak, { label: '10/31', kwh: '9 度' })
+})
+
+test('详情页：旧快照里的占位行不算读数', () => {
+  const daily = [...readings(3), { day: '2026-11-04', kwh: null, yuan: null }]
+  const v = detail({ daily })
+  assert.equal(v.daily.length, 3)
+  assert.equal(v.dailyAverage.text, '14 度')
+})
+
+test('详情页：读数少于 3 天没有日均，但有最高；没有读数时都没有', () => {
+  const two = detail({ daily: readings(2) })
+  assert.equal(two.dailyAverage, null)
+  assert.ok(two.dailyPeak)
+  const none = detail()
+  assert.deepEqual(none.daily, [])
+  assert.equal(none.dailyAverage, null)
+  assert.equal(none.dailyPeak, null)
+})
+
+test('详情页：账单列表最新的在前，图表时间升序，跨年写明年份', () => {
+  const v = detail({ bills: [bill('2025-12', 305, 198.25), bill('2026-01', 280, 150), bill('2026-10', 1234.4, 1000)] })
+  assert.deepEqual(v.monthRows, [
+    { label: '10月', value: '1,234 度 · 1000.00 元' },
+    { label: '1月', value: '280 度 · 150.00 元' },
+    { label: '2025年12月', value: '305 度 · 198.25 元' },
+  ])
+  assert.deepEqual(v.months, [{ label: '12月', kwh: 305 }, { label: '1月', kwh: 280 }, { label: '10月', kwh: 1234.4 }])
+})
+
+test('详情页：缺电量或电费的账单显示 --，图表跳过没有电量的月份', () => {
+  const v = detail({ bills: [bill('2026-08', null, 50), bill('2026-09', 100, null), bill('2026-10', null, null)] })
+  assert.deepEqual(v.monthRows.map(row => row.value), ['-- · --', '100 度 · --', '-- · 50.00 元'])
+  assert.deepEqual(v.months, [{ label: '9月', kwh: 100 }], '不能画成 0')
+})
+
+test('详情页：旧快照没有账单列表时先显示上期账单，都没有时是空的', () => {
+  const old = detail({ lastBill: bill('2026-10', 300, 247) })
+  assert.deepEqual(old.monthRows, [{ label: '10月', value: '300 度 · 247.00 元' }])
+  assert.deepEqual(old.months, [{ label: '10月', kwh: 300 }])
+  assert.deepEqual(detail({ bills: [], lastBill: bill('2026-10') }).monthRows.length, 1, '空列表也一样')
+  assert.deepEqual(detail().monthRows, [])
+  assert.deepEqual(detail().months, [])
+})
+
+test('详情页：今年已出账，缺一项显示 --，都缺时不显示', () => {
+  assert.equal(detail({ yearKwh: 4650, yearYuan: 2345.6 }).yearSettled, '4,650 度 · 2345.60 元')
+  assert.equal(detail({ yearKwh: 4650 }).yearSettled, '4,650 度 · --')
+  assert.equal(detail().yearSettled, null)
+})
+
+test('详情页：小组件那部分内容和小组件算出来的一样', () => {
+  const patch = { yearEstimateKwh: 4700, monthKwh: 42, daily: readings(14), fetchedAt: NOV_5 }
+  assert.deepEqual(detail(patch).bill, view(patch))
 })
 
 test('演示数据能正常生成', () => {

@@ -11,7 +11,7 @@
 import { md5Hex } from './protocol/bytes'
 import { APP_KEYS, chinaTime, SgccClient, SgccError, type Transport } from './protocol/client'
 import { parseNumber } from './protocol/parse'
-import { DEFAULT_SETTINGS, type Account, type DailyUsage, type Session, type Settings, type Snapshot } from './types'
+import { DEFAULT_SETTINGS, type Account, type DailyUsage, type MonthlyBill, type Session, type Settings, type Snapshot } from './types'
 import { buildBillView, demoSnapshot, type BillView } from './view-model'
 import { loadSettings, vault, type Block } from './vault'
 
@@ -27,6 +27,9 @@ const RETRY_AFTER_FAILURE = HOUR
 /** 小组件一次运行里花在联网上的总时间。官方文档没写上限，只说扩展进程随时可能被结束。 */
 const WIDGET_NETWORK_BUDGET = 25 * 1000
 const LOGIN_EXPIRED = '登录已过期，需要重新登录'
+/** 详情页的图表要看这么多天，小组件只要柱状图那几天。 */
+const DETAIL_CHART_DAYS = 30
+const BILL_HISTORY_MONTHS = 12
 
 type Attempt<T> = { ok: true; value: T } | { ok: false }
 
@@ -44,6 +47,9 @@ export type LoginState = {
   sessionExpiresAt: number | null
   block: Block | null
 }
+
+/** 没有保存密码，登录又到期了：不能自动续，要用户自己再登录一次。 */
+export const needsManualLogin = (login: LoginState) => login.signedIn && !login.canAutoLogin && !login.sessionExpiresAt
 
 /** 小组件参数：官方预览要求参数是 JSON 字符串，桌面上则是用户手写的文本，两种都接受。 */
 export function normalizeParameter(raw: unknown): string {
@@ -150,7 +156,8 @@ export function createService(
     return session?.token && session.expiresAt > now() + SESSION_MARGIN ? session : null
   }
 
-  async function fetchSnapshot(session: Session, account: Account, settings: Settings): Promise<Snapshot> {
+  /** includeHistory 只由详情页的“立即刷新”打开，后台和登录时的请求数不受影响。 */
+  async function fetchSnapshot(session: Session, account: Account, settings: Settings, includeHistory: boolean): Promise<Snapshot> {
     const credentials = vault.credentials()
     if (!credentials) throw new SgccError('credentials', 'no-credentials', '请先登录')
     const client = clientFor(credentials.phone)
@@ -186,10 +193,19 @@ export function createService(
     const billingResult = await attempt(() => client.monthlyBills(session, account, today.year))
     const billing = billingResult.ok ? billingResult.value : null
     let lastBill = billing ? billing.bills[billing.bills.length - 1] ?? null : previous?.lastBill ?? null
-    if (billing && !lastBill) {
-      const lastYear = await attempt(() => client.monthlyBills(session, account, today.year - 1))
-      lastBill = lastYear.ok ? lastYear.value.bills[lastYear.value.bills.length - 1] ?? null : previous?.lastBill ?? null
+    // 去年的账单不会再变，查到过就存下来，不再重复查。
+    const knownBills = previous?.bills ?? []
+    const wantsLastYear = includeHistory && !knownBills.some(bill => bill.month.startsWith(`${today.year - 1}-`))
+    let lastYearBills: MonthlyBill[] = []
+    if (billing && (!lastBill || wantsLastYear)) {
+      const needsLastBill = !lastBill
+      // 已经有上期账单时这次只是补充历史，连网络错误也不能让整次更新作废。
+      const lastYear = await attempt(() => client.monthlyBills(session, account, today.year - 1), !needsLastBill)
+      if (lastYear.ok) lastYearBills = lastYear.value.bills
+      if (needsLastBill) lastBill = lastYear.ok ? lastYear.value.bills[lastYear.value.bills.length - 1] ?? null : previous?.lastBill ?? null
     }
+    const billsByMonth = new Map<string, MonthlyBill>()
+    for (const bill of [...knownBills, ...lastYearBills, ...(billing?.bills ?? [])]) billsByMonth.set(bill.month, bill)
     const settledThrough = lastBill ? lastBill.endDay ?? lastDayOfMonth(lastBill.month) : null
 
     // 合并多次查询的结果：后查到的覆盖先查到的，但占位行不能盖掉真实读数。
@@ -200,6 +216,7 @@ export function createService(
       }
     }
     const usableDays = () => [...byDay.values()].filter(day => day.kwh !== null).length
+    const wantedDays = includeHistory ? DETAIL_CHART_DAYS : settings.chartDays
     // 先放上次存下的读数：这次接口少返回几天，柱状图和阶梯估算也不会倒退，攒够之后还能少发请求。
     merge(previous?.daily ?? [])
     merge(currentDaily?.readings ?? [])
@@ -207,13 +224,13 @@ export function createService(
     // 上个月还没出账时，阶梯估算要用它的每日数据。缓存里可能缺月底那几天，所以必须查整月。
     const [previousStart, previousEnd] = previousMonthRange(today.year, today.month)
     const previousUnsettled = settledThrough !== null && settledThrough < previousEnd
-    if (previousUnsettled || usableDays() < settings.chartDays) {
+    if (previousUnsettled || usableDays() < wantedDays) {
       const lastMonth = await attempt(() => client.dailyUsage(session, account, previousStart, previousEnd))
       if (lastMonth.ok) merge(lastMonth.value.readings)
     }
 
     // 还不够就再试一次滚动窗口。这一步只是补充，连网络错误也不能让整次更新作废。
-    if (usableDays() < settings.chartDays) {
+    if (usableDays() < wantedDays) {
       const rolling = await attempt(() => client.dailyUsage(session, account, chinaTime(t - ROLLING_WINDOW_DAYS * DAY).isoDay, today.isoDay), true)
       if (rolling.ok) merge(rolling.value.readings)
     }
@@ -245,6 +262,7 @@ export function createService(
       balance: balanceResult.ok ? balanceResult.value : previous?.balance ?? null,
       monthKwh,
       lastBill,
+      bills: [...billsByMonth.values()].sort((a, b) => a.month.localeCompare(b.month)).slice(-BILL_HISTORY_MONTHS),
       yearKwh: billing ? billing.kwh : previousSameYear?.yearKwh ?? null,
       yearYuan: billing ? billing.yuan : previousSameYear?.yearYuan ?? null,
       yearEstimateKwh,
@@ -254,14 +272,14 @@ export function createService(
   }
 
   /** 会话过期时重新登录并重试一次，第二次失败就交给调用方。 */
-  async function queryWithSession(mode: 'background' | 'interactive', account: Account, settings: Settings): Promise<Snapshot> {
+  async function queryWithSession(mode: 'background' | 'interactive', account: Account, settings: Settings, includeHistory = false): Promise<Snapshot> {
     const session = validSession() ?? (await login(mode))
     try {
-      return await fetchSnapshot(session, account, settings)
+      return await fetchSnapshot(session, account, settings, includeHistory)
     } catch (error) {
       if (!(error instanceof SgccError && error.kind === 'session')) throw error
       vault.clearSession()
-      return fetchSnapshot(await login(mode), account, settings)
+      return fetchSnapshot(await login(mode), account, settings, includeHistory)
     }
   }
 
@@ -329,8 +347,11 @@ export function createService(
       return clientFor(phone).sendLoginSms()
     },
 
-    /** 用户点“立即刷新”。不受后台频率限制，但被闸门拦下时要先重新登录。 */
-    async refreshNow(accountId?: string | null): Promise<Snapshot> {
+    /**
+     * 用户点“立即刷新”。不受后台频率限制，但被闸门拦下时要先重新登录。
+     * includeHistory：详情页要看 30 天读数和 12 个月账单，缺的话这次补上。
+     */
+    async refreshNow(accountId?: string | null, options: { includeHistory?: boolean } = {}): Promise<Snapshot> {
       const settings = loadSettings()
       const block = vault.gate().block
       if (block) throw new SgccError(block.kind, 'blocked', blockMessage(block))
@@ -338,7 +359,7 @@ export function createService(
       const account = accounts.find(a => a.id === (accountId ?? settings.accountId)) ?? accounts[0]
       if (!account) throw new SgccError('credentials', 'no-account', '没有可用的户号，请重新登录')
       try {
-        const snapshot = await queryWithSession('interactive', account, settings)
+        const snapshot = await queryWithSession('interactive', account, settings, options.includeHistory ?? false)
         vault.saveSnapshot(snapshot)
         vault.saveLastAttempt(account.id, now())
         return snapshot

@@ -7,19 +7,19 @@ import type { WidgetModel } from '../lib/service'
 import { PLACEHOLDER, type BillView, type Tone } from '../lib/view-model'
 
 const BACKGROUND = { light: '#FFFFFF', dark: '#1C1C1E' }
-const ACCENT = { light: '#0B8F7E', dark: '#3AD6BF' }
-const ACCENT_SOFT = { light: 'rgba(11,143,126,0.32)', dark: 'rgba(58,214,191,0.34)' }
+export const ACCENT = { light: '#0B8F7E', dark: '#3AD6BF' }
+export const ACCENT_SOFT = { light: 'rgba(11,143,126,0.32)', dark: 'rgba(58,214,191,0.34)' }
 const TRACK = { light: 'rgba(60,60,67,0.12)', dark: 'rgba(235,235,245,0.16)' }
 const TIER_COLORS = ['systemGreen', 'systemOrange', 'systemRed']
 /** 小字用的橙色：systemOrange 在白底上对比度不够。 */
-const URGENT_TEXT = { light: '#A85A00', dark: '#FFB340' }
-const SECONDARY = 'secondaryLabel'
+export const URGENT_TEXT = { light: '#A85A00', dark: '#FFB340' }
+export const SECONDARY = 'secondaryLabel'
 const TERTIARY = 'tertiaryLabel'
 
-const toneColor = (tone: Tone) => (tone === 'danger' ? 'systemRed' : tone === 'warning' ? 'systemOrange' : 'label')
+export const toneColor = (tone: Tone) => (tone === 'danger' ? 'systemRed' : tone === 'warning' ? 'systemOrange' : 'label')
 
 /** 137 → 137 度；缺失时只显示 --，不带单位。 */
-const kwhText = (value: string) => (value === PLACEHOLDER ? PLACEHOLDER : `${value} 度`)
+export const kwhText = (value: string) => (value === PLACEHOLDER ? PLACEHOLDER : `${value} 度`)
 
 function Title({ text }: { text: string }) {
   return (
@@ -156,7 +156,7 @@ function lastBillLine({ lastBill }: BillView): string {
 }
 
 /** 三段等宽，每段表示这一档用了多少。 */
-function TierBar({ view }: { view: BillView }) {
+export function TierBar({ view }: { view: BillView }) {
   if (!view.tier) return null
   return (
     <HStack spacing={3} frame={{ maxWidth: 'infinity' }}>

@@ -1,7 +1,7 @@
 /** 把数据变成小组件要显示的文字和比例。纯函数，方便测试。 */
 import { chinaTime } from './protocol/client'
 import { isOpaque } from './protocol/parse'
-import type { Account, Balance, Settings, Snapshot } from './types'
+import type { Account, Balance, MonthlyBill, Settings, Snapshot } from './types'
 
 export type Tone = 'normal' | 'warning' | 'danger'
 
@@ -26,9 +26,25 @@ export type BillView = {
   notice: string | null
 }
 
+/** 详情页要显示的内容。图表要真实数字，列表要格式化好的文字。 */
+export type DetailView = {
+  bill: BillView
+  /** 最近 30 个有读数的日子，时间升序 */
+  daily: Array<{ day: string; kwh: number }>
+  dailyAverage: { kwh: number; text: string } | null
+  dailyPeak: { label: string; kwh: string } | null
+  /** 有电量的账单，时间升序，画图用 */
+  months: Array<{ label: string; kwh: number }>
+  /** 全部账单，最新的在前，列表用 */
+  monthRows: Array<{ label: string; value: string }>
+  /** 今年已出账的电量和电费 */
+  yearSettled: string | null
+}
+
 export const PLACEHOLDER = '--'
 
 const DAY_MS = 86_400_000
+const DETAIL_DAYS = 30
 /** 读数太少时平均值没有参考价值。 */
 const MIN_DAYS_FOR_AVERAGE = 3
 /** 用电量随季节变化，更远的预估不可靠，不如直接显示还差多少度。 */
@@ -106,13 +122,17 @@ export function accountDisplayName(account: Account): string {
   return isOpaque(account.name) ? '用电户号' : account.name
 }
 
+/** 旧版本存下的快照里还有占位行，这里统一去掉。 */
+const realReadings = (snapshot: Snapshot) => snapshot.daily.filter((day): day is { day: string; kwh: number; yuan: number | null } => day.kwh !== null)
+
+const sumKwh = (days: Array<{ kwh: number }>) => days.reduce((total, day) => total + day.kwh, 0)
+
 export function buildBillView(snapshot: Snapshot, account: Account, settings: Settings, notice: string | null): BillView {
-  const readings = snapshot.daily.filter((day): day is { day: string; kwh: number; yuan: number | null } => day.kwh !== null)
-  const recent = readings.slice(-settings.chartDays)
+  const recent = realReadings(snapshot).slice(-settings.chartDays)
   const max = Math.max(0, ...recent.map(day => day.kwh))
   const last = recent[recent.length - 1]
   const updated = chinaTime(snapshot.fetchedAt)
-  const average = recent.length >= MIN_DAYS_FOR_AVERAGE ? recent.reduce((total, day) => total + day.kwh, 0) / recent.length : null
+  const average = recent.length >= MIN_DAYS_FOR_AVERAGE ? sumKwh(recent) / recent.length : null
   const pace = average === null ? null : { kwhPerDay: average, latestDay: last.day, today: updated.isoDay }
   const tierView = tier(snapshot.yearEstimateKwh, settings, pace)
   return {
@@ -133,6 +153,34 @@ export function buildBillView(snapshot: Snapshot, account: Account, settings: Se
     tier: tierView,
     updated: `${updated.month}/${updated.day} ${updated.hour}:${updated.minute}`,
     notice,
+  }
+}
+
+const monthNumber = (month: string) => Number(month.slice(5, 7))
+
+function monthRowValue({ kwh, yuan }: MonthlyBill): string {
+  return `${kwh === null ? PLACEHOLDER : `${formatKwh(kwh)} 度`} · ${yuan === null ? PLACEHOLDER : `${formatYuan(yuan)} 元`}`
+}
+
+export function buildDetailView(snapshot: Snapshot, account: Account, settings: Settings): DetailView {
+  const readings = realReadings(snapshot).slice(-DETAIL_DAYS)
+  const peak = readings.length ? readings.reduce((highest, day) => (day.kwh > highest.kwh ? day : highest)) : null
+  const average = readings.length >= MIN_DAYS_FOR_AVERAGE ? sumKwh(readings) / readings.length : null
+  // 旧版本存下的快照只有上期账单，下次刷新之前先显示这一条。
+  const bills = snapshot.bills?.length ? snapshot.bills : snapshot.lastBill ? [snapshot.lastBill] : []
+  const latestYear = bills.length ? bills[bills.length - 1].month.slice(0, 4) : ''
+  return {
+    bill: buildBillView(snapshot, account, settings, null),
+    daily: readings.map(({ day, kwh }) => ({ day, kwh })),
+    dailyAverage: average === null ? null : { kwh: average, text: `${formatKwh(average)} 度` },
+    dailyPeak: peak ? { label: shortDay(peak.day), kwh: `${formatKwh(peak.kwh)} 度` } : null,
+    months: bills.flatMap(bill => (bill.kwh === null ? [] : [{ label: `${monthNumber(bill.month)}月`, kwh: bill.kwh }])),
+    monthRows: [...bills].reverse().map(bill => ({
+      // 跨年时要写明年份，否则去年 12 月和今年 1 月排在一起看不出来。
+      label: bill.month.startsWith(latestYear) ? `${monthNumber(bill.month)}月` : `${bill.month.slice(0, 4)}年${monthNumber(bill.month)}月`,
+      value: monthRowValue(bill),
+    })),
+    yearSettled: snapshot.yearKwh === null && snapshot.yearYuan === null ? null : monthRowValue({ month: '', kwh: snapshot.yearKwh, yuan: snapshot.yearYuan, endDay: null }),
   }
 }
 

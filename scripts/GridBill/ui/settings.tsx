@@ -1,7 +1,7 @@
 /** 脚本主界面：登录、选户号、显示设置、手动刷新。 */
 import { Button, LabeledContent, List, Navigation, NavigationStack, Picker, Script, SecureField, Section, Text, TextField, useState, Widget } from 'scripting'
 import { chinaTime, SgccError } from '../lib/protocol/client'
-import { createService, type LoginState } from '../lib/service'
+import { createService, needsManualLogin, type LoginState } from '../lib/service'
 import { scriptingTransport } from '../lib/transport'
 import { DEFAULT_SETTINGS, type Settings } from '../lib/types'
 import { loadSettings, saveSettings, vault } from '../lib/vault'
@@ -28,7 +28,7 @@ export function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-const maskTail = (text: string) => (text.length > 4 ? `****${text.slice(-4)}` : text)
+export const maskTail = (text: string) => (text.length > 4 ? `****${text.slice(-4)}` : text)
 
 function formatTime(ms: number): string {
   const t = chinaTime(ms)
@@ -97,10 +97,9 @@ export function SettingsPage({ initial }: { initial: InitialState }) {
   const [report, setReport] = useState('')
 
   const selectedAccount = login.accounts.find(a => a.id === settings.accountId) ?? login.accounts[0] ?? null
-  // 没有保存密码时登录到期不能自动续，要用户自己再登录一次。
-  const needsManualLogin = login.signedIn && !login.canAutoLogin && !login.sessionExpiresAt
-  const showForm = !login.signedIn || !!login.block || wantsRelogin || needsManualLogin
-  const canQuery = login.signedIn && !login.block && !needsManualLogin
+  const loginExpired = needsManualLogin(login)
+  const showForm = !login.signedIn || !!login.block || wantsRelogin || loginExpired
+  const canQuery = login.signedIn && !login.block && !loginExpired
   const usesCode = mode === 'code' || needsSms
   const canSubmit = !!phone.trim() && (mode === 'code' ? !!codeKey && !!code.trim() : !!password)
 
@@ -302,7 +301,7 @@ export function SettingsPage({ initial }: { initial: InitialState }) {
           {login.signedIn ? <LabeledContent title="账号" value={maskTail(login.phone)} /> : null}
           {login.signedIn && login.sessionExpiresAt ? <LabeledContent title="本次登录到期" value={formatTime(login.sessionExpiresAt)} /> : null}
           {login.block ? <Text foregroundStyle="systemOrange">已暂停自动更新：{login.block.message}。处理好之前小组件不会再联网。</Text> : null}
-          {needsManualLogin && !login.block ? <Text foregroundStyle="systemOrange">登录已过期。没有保存密码，需要再登录一次，登录前小组件不会联网。</Text> : null}
+          {loginExpired && !login.block ? <Text foregroundStyle="systemOrange">登录已过期。没有保存密码，需要再登录一次，登录前小组件不会联网。</Text> : null}
           {showForm ? (
             <Picker title="登录方式" value={mode} onChanged={switchMode} pickerStyle="segmented" disabled={busy}>
               <Text tag="password">密码登录</Text>
